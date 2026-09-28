@@ -683,6 +683,7 @@ function macro.SaveProfile(name)
     local json = serializeMacro()
     writefile(path, json)
     macro.currentProfileName = name
+    if macro.SaveSettings then macro.SaveSettings() end
     return name
 end
 
@@ -695,6 +696,7 @@ function macro.LoadProfile(name)
     if ok and res then
         macro.macro = res
         macro.currentProfileName = name
+        if macro.SaveSettings then macro.SaveSettings() end
         return true
     end
     return false
@@ -707,11 +709,63 @@ function macro.DeleteProfile(name)
         delfile(path)
         if macro.currentProfileName == name then
             macro.currentProfileName = "Unsaved"
+            if macro.SaveSettings then macro.SaveSettings() end
         end
         return true
     end
     return false
 end
+
+-- ── 7.3.5. Auto Save / Restore Settings Controller ───────────
+local settingsPath = "AA_Macro/settings.json"
+
+function macro.SaveSettings()
+    pcall(function()
+        if not isfolder("AA_Macro") then makefolder("AA_Macro") end
+        local cfg = {
+            autoStartOnMatch   = macro.autoStartOnMatch,
+            autoReplay         = macro.autoReplay,
+            playMode           = macro.playMode,
+            actionDelay        = macro.actionDelay,
+            replayDelay        = macro.replayDelay,
+            showHUD            = macro.showHUD,
+            currentProfileName = macro.currentProfileName,
+            webhookUrl         = macro.webhookUrl or "",
+            webhookEnabled     = macro.webhookEnabled or false,
+            webhookNotifyOnFinish = macro.webhookNotifyOnFinish ~= false,
+            webhookCensorUser  = macro.webhookCensorUser or false,
+        }
+        writefile(settingsPath, HttpService:JSONEncode(cfg))
+    end)
+end
+
+function macro.LoadSettings()
+    pcall(function()
+        if isfile and isfile(settingsPath) then
+            local raw = readfile(settingsPath)
+            local data = HttpService:JSONDecode(raw)
+            if type(data) == "table" then
+                if data.autoStartOnMatch ~= nil then macro.autoStartOnMatch = data.autoStartOnMatch end
+                if data.autoReplay ~= nil then macro.autoReplay = data.autoReplay end
+                if data.playMode ~= nil then macro.playMode = data.playMode end
+                if data.actionDelay ~= nil then macro.actionDelay = tonumber(data.actionDelay) or macro.actionDelay end
+                if data.replayDelay ~= nil then macro.replayDelay = tonumber(data.replayDelay) or macro.replayDelay end
+                if data.showHUD ~= nil then macro.showHUD = data.showHUD end
+                if data.webhookUrl ~= nil then macro.webhookUrl = data.webhookUrl end
+                if data.webhookEnabled ~= nil then macro.webhookEnabled = data.webhookEnabled end
+                if data.webhookNotifyOnFinish ~= nil then macro.webhookNotifyOnFinish = data.webhookNotifyOnFinish end
+                if data.webhookCensorUser ~= nil then macro.webhookCensorUser = data.webhookCensorUser end
+                if data.currentProfileName and data.currentProfileName ~= "" and data.currentProfileName ~= "(No saved profiles)" and data.currentProfileName ~= "Unsaved" then
+                    macro.currentProfileName = data.currentProfileName
+                    pcall(function()
+                        macro.LoadProfile(data.currentProfileName)
+                    end)
+                end
+            end
+        end
+    end)
+end
+macro.LoadSettings()
 
 -- ── 7.4. Cloud Macro Share & Import Controller ──────────────
 local function normalizeShareUrl(input)
@@ -1061,6 +1115,7 @@ function macro.SaveWebhookConfig()
             censorUser     = macro.webhookCensorUser or false,
         }
         writefile(webhookConfigPath, game:GetService("HttpService"):JSONEncode(cfg))
+        if macro.SaveSettings then macro.SaveSettings() end
     end)
 end
 
@@ -1606,12 +1661,13 @@ Tabs.Controls:AddButton({
 Tabs.Controls:AddSlider("ActionDelay", {
     Title       = "Action Delay (วินาที)",
     Description = "ระยะเวลาหน่วงระหว่างแต่ละการกระทำ",
-    Default     = 0.15,
+    Default     = macro.actionDelay or 0.15,
     Min         = 0.05,
     Max         = 1.0,
     Rounding    = 2,
     Callback    = function(val)
         macro.actionDelay = val
+        macro.SaveSettings()
     end,
 })
 
@@ -1621,18 +1677,21 @@ Tabs.Controls:AddToggle("CtrlAutoReplay", {
     Default     = macro.autoReplay,
     Callback    = function(val)
         macro.autoReplay = val
+        macro.SaveSettings()
+        Fluent:Notify({ Title = "Auto Replay", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 
 Tabs.Controls:AddSlider("ReplayDelay", {
     Title       = "Replay Delay (วินาที)",
     Description = "หน่วงเวลาก่อนกด Replay เพื่อให้เห็นของดรอป",
-    Default     = 2.0,
+    Default     = macro.replayDelay or 2.0,
     Min         = 0.5,
     Max         = 8.0,
     Rounding    = 1,
     Callback    = function(val)
         macro.replayDelay = val
+        macro.SaveSettings()
     end,
 })
 
@@ -1642,9 +1701,11 @@ Tabs.Controls:AddToggle("AutoStartMatch", {
     Default     = macro.autoStartOnMatch,
     Callback    = function(val)
         macro.autoStartOnMatch = val
+        macro.SaveSettings()
         if val then
             macro.CheckAndVoteStart()
         end
+        Fluent:Notify({ Title = "Auto Start", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 

@@ -601,6 +601,7 @@ function macro.SaveProfile(name)
     local json = serializeMacro()
     writefile(path, json)
     macro.currentProfileName = name
+    if macro.SaveSettings then macro.SaveSettings() end
     return name
 end
 
@@ -613,6 +614,7 @@ function macro.LoadProfile(name)
     if ok and res then
         macro.macro = res
         macro.currentProfileName = name
+        if macro.SaveSettings then macro.SaveSettings() end
         return true
     end
     return false
@@ -625,11 +627,63 @@ function macro.DeleteProfile(name)
         delfile(path)
         if macro.currentProfileName == name then
             macro.currentProfileName = "Unsaved"
+            if macro.SaveSettings then macro.SaveSettings() end
         end
         return true
     end
     return false
 end
+
+-- ── 7.3.5. Auto Save / Restore Settings Controller ───────────
+local settingsPath = "AA_Macro/settings.json"
+
+function macro.SaveSettings()
+    pcall(function()
+        if not isfolder("AA_Macro") then makefolder("AA_Macro") end
+        local cfg = {
+            autoStartOnMatch   = macro.autoStartOnMatch,
+            autoReplay         = macro.autoReplay,
+            playMode           = macro.playMode,
+            actionDelay        = macro.actionDelay,
+            replayDelay        = macro.replayDelay,
+            showHUD            = macro.showHUD,
+            currentProfileName = macro.currentProfileName,
+            webhookUrl         = macro.webhookUrl or "",
+            webhookEnabled     = macro.webhookEnabled or false,
+            webhookNotifyOnFinish = macro.webhookNotifyOnFinish ~= false,
+            webhookCensorUser  = macro.webhookCensorUser or false,
+        }
+        writefile(settingsPath, HttpService:JSONEncode(cfg))
+    end)
+end
+
+function macro.LoadSettings()
+    pcall(function()
+        if isfile and isfile(settingsPath) then
+            local raw = readfile(settingsPath)
+            local data = HttpService:JSONDecode(raw)
+            if type(data) == "table" then
+                if data.autoStartOnMatch ~= nil then macro.autoStartOnMatch = data.autoStartOnMatch end
+                if data.autoReplay ~= nil then macro.autoReplay = data.autoReplay end
+                if data.playMode ~= nil then macro.playMode = data.playMode end
+                if data.actionDelay ~= nil then macro.actionDelay = tonumber(data.actionDelay) or macro.actionDelay end
+                if data.replayDelay ~= nil then macro.replayDelay = tonumber(data.replayDelay) or macro.replayDelay end
+                if data.showHUD ~= nil then macro.showHUD = data.showHUD end
+                if data.webhookUrl ~= nil then macro.webhookUrl = data.webhookUrl end
+                if data.webhookEnabled ~= nil then macro.webhookEnabled = data.webhookEnabled end
+                if data.webhookNotifyOnFinish ~= nil then macro.webhookNotifyOnFinish = data.webhookNotifyOnFinish end
+                if data.webhookCensorUser ~= nil then macro.webhookCensorUser = data.webhookCensorUser end
+                if data.currentProfileName and data.currentProfileName ~= "" and data.currentProfileName ~= "(No saved profiles)" and data.currentProfileName ~= "Unsaved" then
+                    macro.currentProfileName = data.currentProfileName
+                    pcall(function()
+                        macro.LoadProfile(data.currentProfileName)
+                    end)
+                end
+            end
+        end
+    end)
+end
+macro.LoadSettings()
 
 -- ── 7.4. Cloud Macro Share & Import Controller ──────────────
 local function normalizeShareUrl(input)
@@ -978,6 +1032,7 @@ function macro.SaveWebhookConfig()
             censorUser     = macro.webhookCensorUser or false,
         }
         writefile(webhookConfigPath, game:GetService("HttpService"):JSONEncode(cfg))
+        if macro.SaveSettings then macro.SaveSettings() end
     end)
 end
 
@@ -1351,6 +1406,7 @@ local hudGui = Instance.new("ScreenGui")
 hudGui.Name = "AAMacro_HUD_v2"
 hudGui.ResetOnSpawn = false
 hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+hudGui.Enabled = (macro.showHUD ~= false)
 pcall(function() hudGui.Parent = gethui() end)
 
 local hudFrame = Instance.new("Frame")
@@ -1617,18 +1673,22 @@ Tabs.Macro:AddDropdown("MacroPlayMode", {
     Default     = macro.playMode,
     Callback    = function(val)
         macro.playMode = val
-        Fluent:Notify({ Title = "Mode", Content = "โหมด: " .. val, Duration = 2 })
+        macro.SaveSettings()
+        Fluent:Notify({ Title = "Mode", Content = "โหมด: " .. val .. " (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 
 Tabs.Macro:AddSlider("MacroActionDelay", {
     Title       = "Action Delay (วินาที)",
     Description = "ระยะเวลาหน่วงระหว่างแต่ละการกระทำ",
-    Default     = 0.15,
+    Default     = macro.actionDelay or 0.15,
     Min         = 0.05,
     Max         = 1.0,
     Rounding    = 2,
-    Callback    = function(val) macro.actionDelay = val end,
+    Callback    = function(val)
+        macro.actionDelay = val
+        macro.SaveSettings()
+    end,
 })
 
 Tabs.Macro:AddToggle("MacroAutoReplay", {
@@ -1637,18 +1697,22 @@ Tabs.Macro:AddToggle("MacroAutoReplay", {
     Default     = macro.autoReplay,
     Callback    = function(val)
         macro.autoReplay = val
-        Fluent:Notify({ Title = "Auto Replay", Content = val and "🟢 เปิดใช้งาน" or "🔴 ปิด", Duration = 2 })
+        macro.SaveSettings()
+        Fluent:Notify({ Title = "Auto Replay", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 
 Tabs.Macro:AddSlider("MacroReplayDelay", {
     Title       = "Replay Delay (วินาที)",
     Description = "หน่วงเวลาก่อนกด Replay เพื่อให้เห็นของดรอป",
-    Default     = 2.0,
+    Default     = macro.replayDelay or 2.0,
     Min         = 0.5,
     Max         = 8.0,
     Rounding    = 1,
-    Callback    = function(val) macro.replayDelay = val end,
+    Callback    = function(val)
+        macro.replayDelay = val
+        macro.SaveSettings()
+    end,
 })
 
 Tabs.Macro:AddToggle("MacroAutoStart", {
@@ -1657,18 +1721,21 @@ Tabs.Macro:AddToggle("MacroAutoStart", {
     Default     = macro.autoStartOnMatch,
     Callback    = function(val)
         macro.autoStartOnMatch = val
+        macro.SaveSettings()
         if val then
             macro.CheckAndVoteStart()
         end
+        Fluent:Notify({ Title = "Auto Start", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 
 Tabs.Macro:AddToggle("MacroFloatingHUD", {
     Title       = "🖥️ Floating HUD",
     Description = "แสดง HUD Overlay บนหน้าจอ (ลากย้ายได้)",
-    Default     = true,
+    Default     = (macro.showHUD ~= false),
     Callback    = function(val)
         macro.showHUD = val
+        macro.SaveSettings()
         hudGui.Enabled = val
     end,
 })
@@ -1700,21 +1767,33 @@ Tabs.Macro:AddButton({
             return
         end
         local savedName = macro.SaveProfile(inputProfileName)
+        macro.currentProfileName = savedName
+        macro.SaveSettings()
         if ProfileDropdown then
             ProfileDropdown:SetValues(macro.GetProfiles())
             ProfileDropdown:SetValue(savedName)
         end
-        Fluent:Notify({ Title = "💾 Saved", Content = string.format("'%s' — %d ขั้นตอน", savedName, #macro.macro), Duration = 3 })
+        Fluent:Notify({ Title = "💾 Saved", Content = string.format("'%s' — %d ขั้นตอน (บันทึกแล้ว)", savedName, #macro.macro), Duration = 3 })
     end,
 })
 
-local selectedProfile = macro.GetProfiles()[1] or "(No saved profiles)"
+local profileList = macro.GetProfiles()
+local selectedProfile = macro.currentProfileName or profileList[1] or "(No saved profiles)"
+if not table.find(profileList, selectedProfile) then
+    selectedProfile = profileList[1] or "(No saved profiles)"
+end
 
 ProfileDropdown = Tabs.Macro:AddDropdown("MacroProfileList", {
     Title    = "เลือกโปรไฟล์",
-    Values   = macro.GetProfiles(),
+    Values   = profileList,
     Default  = selectedProfile,
-    Callback = function(val) selectedProfile = val end,
+    Callback = function(val)
+        selectedProfile = val
+        if val and val ~= "(No saved profiles)" then
+            macro.currentProfileName = val
+            macro.SaveSettings()
+        end
+    end,
 })
 
 Tabs.Macro:AddButton({
@@ -1726,9 +1805,13 @@ Tabs.Macro:AddButton({
             return
         end
         local ok = macro.LoadProfile(selectedProfile)
+        if ok then
+            macro.currentProfileName = selectedProfile
+            macro.SaveSettings()
+        end
         Fluent:Notify({
             Title   = ok and "📂 Loaded" or "❌ Error",
-            Content = ok and string.format("'%s' — %d ขั้นตอน", selectedProfile, #macro.macro) or "โหลดไม่สำเร็จ",
+            Content = ok and string.format("'%s' — %d ขั้นตอน (บันทึกเป็นโปรไฟล์หลักแล้ว)", selectedProfile, #macro.macro) or "โหลดไม่สำเร็จ",
             Duration = 3,
         })
     end,
@@ -2451,6 +2534,10 @@ end)
 Window:SelectTab(1)
 Fluent:Notify({
     Title    = "AA Macro Studio v2.0 Ready!",
-    Content  = string.format("Macro Tab | RightCtrl = ซ่อน UI | Mode: %s", macro.playMode),
-    Duration = 4,
+    Content  = string.format("💾 โหลดการตั้งค่าแล้ว | AutoStart: %s | AutoReplay: %s | Profile: %s",
+        macro.autoStartOnMatch and "ON" or "OFF",
+        macro.autoReplay and "ON" or "OFF",
+        macro.currentProfileName or "None"
+    ),
+    Duration = 5,
 })
