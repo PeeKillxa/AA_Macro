@@ -611,11 +611,16 @@ local function serializeMacro()
         if entry.position then
             item.position = { entry.position.X, entry.position.Y, entry.position.Z }
         end
-        if entry.type == "spawn" and entry.args then
-            item.unitUuid = entry.args[1]
-            local cf = entry.args[2]
-            if typeof(cf) == "CFrame" then
+        if entry.type == "spawn" then
+            item.unitUuid = entry.args and entry.args[1] or entry.unitId
+            local cf = entry.args and typeof(entry.args[2]) == "CFrame" and entry.args[2] or nil
+            if cf then
                 item.cframe = { cf:GetComponents() }
+            elseif entry.cframe then
+                item.cframe = entry.cframe
+            elseif entry.position then
+                local posCF = CFrame.new(entry.position)
+                item.cframe = { posCF:GetComponents() }
             end
         end
         table.insert(list, item)
@@ -643,10 +648,15 @@ local function deserializeMacro(jsonStr)
         if t.type == "spawn" then
             local cf = nil
             if t.cframe then
-                cf = CFrame.new(table.unpack(t.cframe))
-            elseif entry.position then
+                local ok, result = pcall(function()
+                    return CFrame.new(table.unpack(t.cframe))
+                end)
+                if ok and result then cf = result end
+            end
+            if not cf and entry.position then
                 cf = CFrame.new(entry.position)
             end
+            entry.cframe = t.cframe
             entry.args = { t.unitUuid or entry.unitId, cf }
         elseif t.type == "upgrade" then
             entry.args = {}

@@ -466,19 +466,31 @@ function macro.Play()
 
             if entry.type == "spawn" then
                 local liveUuid = findCurrentUuidForSpawn(entry)
+                -- รวบรวม CFrame จากทุก fallback path
                 local cf = nil
                 if entry.args and typeof(entry.args[2]) == "CFrame" then
                     cf = entry.args[2]
-                elseif entry.cframe then
-                    cf = CFrame.new(table.unpack(entry.cframe))
-                elseif entry.position then
+                end
+                if not cf and entry.cframe then
+                    local ok3, result3 = pcall(function()
+                        return CFrame.new(table.unpack(entry.cframe))
+                    end)
+                    if ok3 then cf = result3 end
+                end
+                if not cf and entry.position then
                     cf = CFrame.new(entry.position)
+                end
+                -- sync กลับเข้า args[2] เผื่อ round ถัดไป
+                if cf and entry.args then
+                    entry.args[2] = cf
                 end
 
                 if not liveUuid then
                     Fluent:Notify({ Title = "❌ UUID nil", Content = "Spawn #"..i..": ไม่พบ UUID ให้ตรวจ Debug tab", Duration = 5 })
                 elseif not cf then
-                    Fluent:Notify({ Title = "❌ CFrame nil", Content = "Spawn #"..i..": ไม่มี CFrame ตรวจ args", Duration = 5 })
+                    -- ข้ามและเตือน แทนที่จะค้างหรือ crash ทั้งหมด
+                    warn("[AA Macro] Spawn #"..i.." SKIPPED — ไม่มี CFrame/position บันทึกไว้ เนื่องจากไฟล์ profile เก่า ให้อัดใหม่อีกครั้ง")
+                    Fluent:Notify({ Title = "⚠️ Skip #"..i, Content = entry.unitName.." ไม่มี CFrame → ข้ามไป (profile เก่า — บันทึกใหม่เพื่อแก้)", Duration = 6 })
                 else
                     local ok2, res2 = pcall(function()
                         return spawnRemote:InvokeServer(liveUuid, cf)
@@ -529,11 +541,19 @@ local function serializeMacro()
         if entry.position then
             item.position = { entry.position.X, entry.position.Y, entry.position.Z }
         end
-        if entry.type == "spawn" and entry.args then
-            item.unitUuid = entry.args[1]
-            local cf = entry.args[2]
-            if typeof(cf) == "CFrame" then
+        if entry.type == "spawn" then
+            item.unitUuid = entry.args and entry.args[1] or entry.unitId
+            -- ลองได้ทุก source: args[2] → entry.cframe → position
+            local cf = entry.args and typeof(entry.args[2]) == "CFrame" and entry.args[2] or nil
+            if cf then
                 item.cframe = { cf:GetComponents() }
+            elseif entry.cframe then
+                -- เก็บ raw cframe array ต่อไปเลย ไม่ต้อง reconstruct
+                item.cframe = entry.cframe
+            elseif entry.position then
+                -- ใช้ position สร้าง cframe เพื่อให้ทุก profile มี cframe เสมอ
+                local posCF = CFrame.new(entry.position)
+                item.cframe = { posCF:GetComponents() }
             end
         end
         table.insert(list, item)
@@ -561,10 +581,20 @@ local function deserializeMacro(jsonStr)
         if t.type == "spawn" then
             local cf = nil
             if t.cframe then
-                cf = CFrame.new(table.unpack(t.cframe))
-            elseif entry.position then
+                -- cframe array มี 12 components (x,y,z + rotation matrix)
+                local ok, result = pcall(function()
+                    return CFrame.new(table.unpack(t.cframe))
+                end)
+                if ok and result then
+                    cf = result
+                end
+            end
+            -- fallback: ถ้าไม่มี cframe ให้ใช้ position (แมพเดิมยังได้)
+            if not cf and entry.position then
                 cf = CFrame.new(entry.position)
             end
+            -- เก็บทั้ง args[2] และ entry.cframe เผื่อ path ไหนก็ได้
+            entry.cframe = t.cframe  -- keep raw array เผื่อ fallback อีกครั้ง
             entry.args = { t.unitUuid or entry.unitId, cf }
         elseif t.type == "upgrade" then
             entry.args = {}
