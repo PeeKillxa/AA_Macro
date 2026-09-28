@@ -1,0 +1,5 @@
+# Ignore personal settings and profiles
+webhook_config.json
+configs/
+profiles/
+*.log
