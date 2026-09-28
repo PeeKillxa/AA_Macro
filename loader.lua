@@ -6,7 +6,7 @@
     • ทุกครั้งที่เปิด จะดึงโค้ดเวอร์ชันล่าสุดจาก GitHub อัตโนมัติ
     • บันทึกลงเครื่องให้อัตโนมัติ รองรับ Auto Replay ข้ามห้อง
 --]]
-
+task.wait(5)
 local GITHUB_USER   = "PeeKillxa"
 local GITHUB_REPO   = "AA_Macro"
 local GITHUB_BRANCH = "main"
