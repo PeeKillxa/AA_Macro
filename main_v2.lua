@@ -268,36 +268,49 @@ end
 local function findLiveUnitForSell(targetPos, unitName, maxDist)
     if not targetPos then return nil end
     maxDist = maxDist or 8
-    -- 1. ลองหาจาก workspace._UNITS ก่อน (unit ที่ยังอยู่บนแมพ)
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     if unitsFolder then
-        local closestUnit = nil
-        local closestDist = maxDist
+        local bestMatchUnit = nil
+        local bestMatchDist = maxDist
+        local fallbackUnit  = nil
+        local fallbackDist  = maxDist
+
         for _, u in ipairs(unitsFolder:GetChildren()) do
             local stats = u:FindFirstChild("_stats")
             if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
-                local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
-                local pos = pPart and pPart.Position or u:GetPivot().Position
-                local d = (pos - targetPos).Magnitude
-                if d < closestDist then
-                    closestDist = d
-                    closestUnit = u
+                local pos = nil
+                pcall(function()
+                    local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
+                    if pPart then
+                        pos = pPart.Position
+                    elseif u:IsA("Model") then
+                        pos = u:GetPivot().Position
+                    end
+                end)
+                if pos then
+                    local d = (pos - targetPos).Magnitude
+                    if d < maxDist then
+                        -- ตรวจจับชื่อทั้ง Model.Name และ _stats.id
+                        local uId = stats:FindFirstChild("id") and stats.id.Value
+                        local isNameMatch = (unitName and unitName ~= "Unit") and (
+                            u.Name:lower() == unitName:lower() or
+                            (uId and tostring(uId):lower() == unitName:lower()) or
+                            u.Name:lower():find(unitName:lower(), 1, true)
+                        )
+                        if isNameMatch and d < bestMatchDist then
+                            bestMatchDist = d
+                            bestMatchUnit = u
+                        end
+                        if d < fallbackDist then
+                            fallbackDist = d
+                            fallbackUnit = u
+                        end
+                    end
                 end
             end
         end
-        if closestUnit then return closestUnit end
-    end
-    -- 2. fallback: ค้นหาจาก getnilinstances ตามชื่อ
-    if getnilinstances and unitName and unitName ~= "Unit" then
-        local ok, result = pcall(function()
-            for _, obj in ipairs(getnilinstances()) do
-                if obj.Name == unitName and obj:IsA("Model") then
-                    return obj
-                end
-            end
-            return nil
-        end)
-        if ok and result then return result end
+        if bestMatchUnit then return bestMatchUnit end
+        if fallbackUnit then return fallbackUnit end
     end
     return nil
 end
@@ -459,11 +472,19 @@ if not _G.__AAMacroHooked then
                 local uName = "Unit"
                 local debugId = nil
                 if typeof(unitModel) == "Instance" then
-                    local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
-                    pos = pPart and pPart.Position or unitModel:GetPivot().Position
+                    pcall(function()
+                        local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+                        if pPart then
+                            pos = pPart.Position
+                        elseif unitModel:IsA("Model") then
+                            pos = unitModel:GetPivot().Position
+                        elseif unitModel:IsA("BasePart") then
+                            pos = unitModel.Position
+                        end
+                    end)
                     local stats = unitModel:FindFirstChild("_stats")
                     uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
-                    uName = unitModel.Name  -- ชื่อ Model เช่น "demiurge" ใช้ใน getnilinstances
+                    uName = unitModel.Name
                     pcall(function() debugId = unitModel:GetDebugId() end)
                 end
                 local entryData3 = {
@@ -2232,7 +2253,7 @@ local function refreshLogView()
         local ps = v.position
             and string.format("(%.0f, %.0f, %.0f)", v.position.X, v.position.Y, v.position.Z)
             or "N/A"
-        local actIcon = v.type == "spawn" and "SPAWN" or "UPG"
+        local actIcon = v.type == "spawn" and "SPAWN" or v.type == "sell" and "SELL" or "UPG"
         local uName = tostring(v.unitName or "Unit"):sub(1, 10)
         local waveTxt = string.format("W%d+%ds", v.wave or 0, v.waveOffset or 0)
         table.insert(lines, string.format(
@@ -2448,9 +2469,11 @@ task.spawn(function()
 
             local spawns = 0
             local upgrades = 0
+            local sells = 0
             for _, e in ipairs(macro.macro) do
                 if e.type == "spawn" then spawns = spawns + 1
-                elseif e.type == "upgrade" then upgrades = upgrades + 1 end
+                elseif e.type == "upgrade" then upgrades = upgrades + 1
+                elseif e.type == "sell" then sells = sells + 1 end
             end
 
             local curWave = getWave()
@@ -2483,16 +2506,16 @@ task.spawn(function()
             DashProgressCard:SetTitle(string.format("📈 PROGRESSION  •  %d%%  (%d/%d)", math.floor(pct * 100), current, total))
             DashProgressCard:SetDesc(table.concat({
                 string.format("%s", progBar),
-                string.format("🎯 Spawn: %d  │  ⬆️ Upgrade: %d  │  📦 รวม: %d", spawns, upgrades, total),
+                string.format("🎯 Spawn: %d  │  ⬆️ Upg: %d  │  💰 Sell: %d  │  📦 รวม: %d", spawns, upgrades, sells, total),
             }, "\n"))
 
             -- ── Macro Tab: Next Action Card ──────────────────
             local hudNextStr = "🎯 Next: รอคำสั่ง..."
             if isPlay and macro.currentStep > 0 and macro.currentStep <= total then
                 local nextEntry = macro.macro[macro.currentStep]
-                local actIcon = nextEntry.type == "spawn" and "🎯 SPAWN" or "⬆️ UPGRADE"
+                local actIcon = nextEntry.type == "spawn" and "🎯 SPAWN" or nextEntry.type == "sell" and "💰 SELL" or "⬆️ UPGRADE"
                 local affordable = canAfford(nextEntry)
-                local affStatus = affordable and "🟢 เงินพอ — พร้อมวาง" or "⏳ รอเงินสะสม..."
+                local affStatus = nextEntry.type == "sell" and "🟢 ขายคืนเงิน — พร้อมทำงาน" or (affordable and "🟢 เงินพอ — พร้อมวาง" or "⏳ รอเงินสะสม...")
                 local posStr = nextEntry.position and string.format("(%.0f, %.0f, %.0f)", nextEntry.position.X, nextEntry.position.Y, nextEntry.position.Z) or "N/A"
                 local timingStr = macro.playMode == "Wave+Delay"
                     and string.format("Wave ≥ %d + %ds", nextEntry.wave or 0, nextEntry.waveOffset or 0)
@@ -2503,7 +2526,7 @@ task.spawn(function()
                     string.format("• Unit     :  %s  (Slot %s)", tostring(nextEntry.unitName or "Unit"), tostring(nextEntry.slotIndex or "-")),
                     string.format("• Position :  📍 %s", posStr),
                     string.format("• Trigger  :  ⏱️ %s", timingStr),
-                    string.format("• Gold     :  💰 %d ¥  →  %s", nextEntry.gold or 0, affStatus),
+                    string.format("• Action   :  %s", affStatus),
                 }, "\n"))
 
                 hudNextStr = string.format("[%d/%d] %s: %s\n%s", macro.currentStep, total, actIcon, tostring(nextEntry.unitName or "Unit"):sub(1,14), affStatus)

@@ -29,6 +29,7 @@ local plr         = game:GetService("Players").LocalPlayer
 
 local spawnRemote   = RS.endpoints.client_to_server.spawn_unit
 local upgradeRemote = RS.endpoints.client_to_server.upgrade_unit_ingame
+local sellRemote    = RS.endpoints.client_to_server.sell_unit_ingame
 local moneyLabel    = plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money.text
 local unitsFrame    = plr.PlayerGui.spawn_units.Lives.Frame.Units
 
@@ -298,8 +299,60 @@ local function canAfford(entry)
     elseif entry.type == "upgrade" then
         local cost = getUpgradeCost(entry)
         return gold >= cost
+    elseif entry.type == "sell" then
+        return true  -- sell ไม่ต้องใช้เงิน ทำได้เสมอ
     end
     return true
+end
+
+-- ค้นหา unit ที่ active อยู่ใน workspace._UNITS ตาม position และ unitName (สำหรับ sell replay)
+local function findLiveUnitForSell(targetPos, unitName, maxDist)
+    if not targetPos then return nil end
+    maxDist = maxDist or 8
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if unitsFolder then
+        local bestMatchUnit = nil
+        local bestMatchDist = maxDist
+        local fallbackUnit  = nil
+        local fallbackDist  = maxDist
+
+        for _, u in ipairs(unitsFolder:GetChildren()) do
+            local stats = u:FindFirstChild("_stats")
+            if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+                local pos = nil
+                pcall(function()
+                    local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
+                    if pPart then
+                        pos = pPart.Position
+                    elseif u:IsA("Model") then
+                        pos = u:GetPivot().Position
+                    end
+                end)
+                if pos then
+                    local d = (pos - targetPos).Magnitude
+                    if d < maxDist then
+                        local uId = stats:FindFirstChild("id") and stats.id.Value
+                        local isNameMatch = (unitName and unitName ~= "Unit") and (
+                            u.Name:lower() == unitName:lower() or
+                            (uId and tostring(uId):lower() == unitName:lower()) or
+                            u.Name:lower():find(unitName:lower(), 1, true)
+                        )
+                        if isNameMatch and d < bestMatchDist then
+                            bestMatchDist = d
+                            bestMatchUnit = u
+                        end
+                        if d < fallbackDist then
+                            fallbackDist = d
+                            fallbackUnit = u
+                        end
+                    end
+                end
+            end
+        end
+        if bestMatchUnit then return bestMatchUnit end
+        if fallbackUnit then return fallbackUnit end
+    end
+    return nil
 end
 
 -- สร้าง Progress Bar สวยงาม
@@ -451,6 +504,53 @@ if not _G.__AAMacroHooked then
                         })
                     end)
                 end)
+            elseif name == "sell_unit_ingame" then
+                local args = {...}
+                local unitModel = args[1]
+                local pos   = nil
+                local uId   = nil
+                local uName = "Unit"
+                local debugId = nil
+                if typeof(unitModel) == "Instance" then
+                    pcall(function()
+                        local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+                        if pPart then
+                            pos = pPart.Position
+                        elseif unitModel:IsA("Model") then
+                            pos = unitModel:GetPivot().Position
+                        elseif unitModel:IsA("BasePart") then
+                            pos = unitModel.Position
+                        end
+                    end)
+                    local stats = unitModel:FindFirstChild("_stats")
+                    uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
+                    uName = unitModel.Name
+                    pcall(function() debugId = unitModel:GetDebugId() end)
+                end
+                local entryData3 = {
+                    type        = "sell",
+                    timestamp   = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
+                    wave        = getWave(),
+                    waveOffset  = math.floor(getWaveElapsed()),
+                    gold        = getGold(),
+                    position    = pos,
+                    unitId      = uId,
+                    unitName    = uName,
+                    debugId     = debugId,
+                    args        = args,
+                }
+                table.insert(macroState.macro, entryData3)
+                task.defer(function()
+                    pcall(function()
+                        Fluent:Notify({
+                            Title    = string.format("🔴 Recorded #%d: SELL", #macroState.macro),
+                            Content  = string.format("💰 Sell: %s\nWave: %d | Gold: %d¥\nPos: %s",
+                                uName, entryData3.wave, entryData3.gold,
+                                pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
+                            Duration = 3,
+                        })
+                    end)
+                end)
             end
         end
         -- !! CRITICAL: คืนค่า namecall method กลับเป็นต้นฉบับ
@@ -586,6 +686,23 @@ function macro.Play()
                 else
                     warn("[AA Macro] upgrade #" .. i .. ": unit not found near pos, skipping")
                 end
+
+            elseif entry.type == "sell" then
+                local liveUnit = findLiveUnitForSell(entry.position, entry.unitName, 8)
+                if liveUnit then
+                    local ok2, res2 = pcall(function()
+                        return sellRemote:InvokeServer(liveUnit)
+                    end)
+                    if not ok2 then
+                        warn("[AA Macro] sell #" .. i .. " error: " .. tostring(res2))
+                        Fluent:Notify({ Title = "❌ Sell Error #"..i, Content = tostring(res2):sub(1,80), Duration = 5 })
+                    else
+                        Fluent:Notify({ Title = "💰 Sold #"..i, Content = tostring(entry.unitName), Duration = 2.5 })
+                    end
+                else
+                    warn("[AA Macro] sell #" .. i .. ": unit '"..tostring(entry.unitName).."' not found near pos, skipping")
+                    Fluent:Notify({ Title = "⚠️ Sell Skip #"..i, Content = entry.unitName.." ไม่พบใกล้ตำแหน่ง", Duration = 4 })
+                end
             end
             task.wait(macro.actionDelay or 0.15)
         end
@@ -623,6 +740,9 @@ local function serializeMacro()
                 item.cframe = { posCF:GetComponents() }
             end
         end
+        if entry.type == "sell" and not item.position and entry.position then
+            item.position = { entry.position.X, entry.position.Y, entry.position.Z }
+        end
         table.insert(list, item)
     end
     return HttpService:JSONEncode(list)
@@ -659,6 +779,8 @@ local function deserializeMacro(jsonStr)
             entry.cframe = t.cframe
             entry.args = { t.unitUuid or entry.unitId, cf }
         elseif t.type == "upgrade" then
+            entry.args = {}
+        elseif t.type == "sell" then
             entry.args = {}
         end
         table.insert(list, entry)
@@ -2076,7 +2198,7 @@ local function refreshLogView()
         local ps = v.position
             and string.format("(%.0f, %.0f, %.0f)", v.position.X, v.position.Y, v.position.Z)
             or "N/A"
-        local actIcon = v.type == "spawn" and "SPAWN" or "UPG"
+        local actIcon = v.type == "spawn" and "SPAWN" or v.type == "sell" and "SELL" or "UPG"
         local uName = tostring(v.unitName or "Unit"):sub(1, 10)
         local waveTxt = string.format("W%d+%ds", v.wave or 0, v.waveOffset or 0)
         table.insert(lines, string.format(
@@ -2294,17 +2416,19 @@ task.spawn(function()
 
             local spawns = 0
             local upgrades = 0
+            local sells = 0
             for _, e in ipairs(macro.macro) do
                 if e.type == "spawn" then spawns = spawns + 1
-                elseif e.type == "upgrade" then upgrades = upgrades + 1 end
+                elseif e.type == "upgrade" then upgrades = upgrades + 1
+                elseif e.type == "sell" then sells = sells + 1 end
             end
 
             local nextText = "—"
             if macro.playing and macro.currentStep > 0 and macro.currentStep <= total then
                 local nextEntry = macro.macro[macro.currentStep]
-                local actIcon = nextEntry.type == "spawn" and "🎯 SPAWN" or "⬆️ UPGRADE"
+                local actIcon = nextEntry.type == "spawn" and "🎯 SPAWN" or nextEntry.type == "sell" and "💰 SELL" or "⬆️ UPGRADE"
                 local affordable = canAfford(nextEntry)
-                local affStatus = affordable and "✅ เงินพอแล้ว พร้อมกด" or "⏳ กำลังรอเงินสะสมให้พอ..."
+                local affStatus = nextEntry.type == "sell" and "🟢 ขายคืนเงิน — พร้อมทำงาน" or (affordable and "✅ เงินพอแล้ว พร้อมกด" or "⏳ กำลังรอเงินสะสมให้พอ...")
                 local posStr = nextEntry.position and string.format("(%.0f, %.0f, %.0f)", nextEntry.position.X, nextEntry.position.Y, nextEntry.position.Z) or "N/A"
                 nextText = string.format("[%d/%d] %s  →  %s\n  • พิกัด: %s\n  • เงื่อนไข: Wave ≥ %d  |  Gold ≥ %d¥\n  • ความพร้อม: %s",
                     macro.currentStep, total, actIcon, nextEntry.unitName or "Unit",
@@ -2328,7 +2452,7 @@ task.spawn(function()
                 string.format("• ยอดเงินสด    :  💰 %s ¥", moneyLabel.Text),
                 string.format("• ตัวในสนาม   :  🛡️ %d ตัว", getActiveUnitsCount()),
                 string.format("• ออโต้รีเพลย์ :  %s (ดีเลย์: %.1fs)", macro.autoReplay and "🟢 เปิด" or "🔴 ปิด", macro.replayDelay or 2.0),
-                string.format("• จำนวนคิว     :  📝 %d ขั้นตอน (Spawn: %d | Upg: %d)", total, spawns, upgrades),
+                string.format("• จำนวนคิว     :  📝 %d ขั้นตอน (🎯 %d Spawn | ⬆️ %d Upg | 💰 %d Sell)", total, spawns, upgrades, sells),
                 "--------------------------------------------------",
                 string.format("• ความคืบหน้า  :  %s  (%d/%d)", progBar, current, total),
                 "--------------------------------------------------",
