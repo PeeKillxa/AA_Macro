@@ -242,24 +242,9 @@ end
 
 -- หา Unit Model ใน workspace._UNITS ที่ผู้เล่นเป็นเจ้าของและอยู่ใกล้พิกัด targetPos พร้อมจับคู่ชื่อ
 local function findLiveUnitForUpgrade(targetPos, unitName, maxDist)
-    maxDist = maxDist or 12
+    maxDist = maxDist or 10
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     if not unitsFolder then return nil end
-
-    if not targetPos then
-        if unitName and unitName ~= "Unit" then
-            for _, u in ipairs(unitsFolder:GetChildren()) do
-                local stats = u:FindFirstChild("_stats")
-                if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
-                    local uId = stats:FindFirstChild("id") and stats.id.Value
-                    if u.Name:lower() == unitName:lower() or (uId and tostring(uId):lower() == unitName:lower()) then
-                        return u
-                    end
-                end
-            end
-        end
-        return nil
-    end
 
     local bestMatchUnit = nil
     local bestMatchDist = maxDist
@@ -278,25 +263,34 @@ local function findLiveUnitForUpgrade(targetPos, unitName, maxDist)
                     pos = u:GetPivot().Position
                 end
             end)
-            if pos then
-                -- คำนวณระยะทางระนาบ XZ ป้องกันความคลาดเคลื่อนจากความสูงแกน Y
-                local d = (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
-                if d < maxDist then
-                    local uId = stats:FindFirstChild("id") and stats.id.Value
-                    local isNameMatch = (unitName and unitName ~= "Unit") and (
-                        u.Name:lower() == unitName:lower() or
-                        (uId and tostring(uId):lower() == unitName:lower()) or
-                        u.Name:lower():find(unitName:lower(), 1, true) or
-                        (uId and tostring(uId):lower():find(unitName:lower(), 1, true))
-                    )
-                    if isNameMatch and d < bestMatchDist then
-                        bestMatchDist = d
-                        bestMatchUnit = u
+            if pos and targetPos then
+                local tX = typeof(targetPos) == "Vector3" and targetPos.X or (type(targetPos) == "table" and (targetPos.X or targetPos[1]))
+                local tZ = typeof(targetPos) == "Vector3" and targetPos.Z or (type(targetPos) == "table" and (targetPos.Z or targetPos[3]))
+                if tX and tZ then
+                    -- วัดระยะแบบ 2D (XZ Plane) ป้องกันความต่างของความสูง Y จาก Animation หรือความสูงตัวละคร
+                    local d = (Vector2.new(pos.X, pos.Z) - Vector2.new(tX, tZ)).Magnitude
+                    if d < maxDist then
+                        local uId = stats:FindFirstChild("id") and stats.id.Value
+                        local isNameMatch = (unitName and unitName ~= "Unit") and (
+                            u.Name:lower() == unitName:lower() or
+                            (uId and tostring(uId):lower() == unitName:lower()) or
+                            u.Name:lower():find(unitName:lower(), 1, true) or
+                            (uId and tostring(uId):lower():find(unitName:lower(), 1, true))
+                        )
+                        if isNameMatch and d < bestMatchDist then
+                            bestMatchDist = d
+                            bestMatchUnit = u
+                        end
+                        if d < fallbackDist then
+                            fallbackDist = d
+                            fallbackUnit = u
+                        end
                     end
-                    if d < fallbackDist then
-                        fallbackDist = d
-                        fallbackUnit = u
-                    end
+                end
+            elseif not targetPos and unitName and unitName ~= "Unit" then
+                local uId = stats:FindFirstChild("id") and stats.id.Value
+                if u.Name:lower() == unitName:lower() or (uId and tostring(uId):lower() == unitName:lower()) then
+                    return u
                 end
             end
         end
@@ -394,26 +388,11 @@ local function canAfford(entry)
     return true
 end
 
--- ค้นหา unit ที่ active อยู่ใน workspace._UNITS ตาม position (สำหรับ sell replay)
+-- ค้นหา unit ที่ active อยู่ใน workspace._UNITS ตาม position และ unitName (สำหรับ sell replay)
 local function findLiveUnitForSell(targetPos, unitName, maxDist)
-    maxDist = maxDist or 15
+    maxDist = maxDist or 10
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     if not unitsFolder then return nil end
-
-    if not targetPos then
-        if unitName and unitName ~= "Unit" then
-            for _, u in ipairs(unitsFolder:GetChildren()) do
-                local stats = u:FindFirstChild("_stats")
-                if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
-                    local uId = stats:FindFirstChild("id") and stats.id.Value
-                    if u.Name:lower() == unitName:lower() or (uId and tostring(uId):lower() == unitName:lower()) then
-                        return u
-                    end
-                end
-            end
-        end
-        return nil
-    end
 
     local bestMatchUnit = nil
     local bestMatchDist = maxDist
@@ -432,32 +411,40 @@ local function findLiveUnitForSell(targetPos, unitName, maxDist)
                     pos = u:GetPivot().Position
                 end
             end)
-            if pos then
-                -- คำนวณระยะทางระนาบ XZ ป้องกันความคลาดเคลื่อนจากความสูงแกน Y
-                local d = (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
-                if d < maxDist then
-                    local uId = stats:FindFirstChild("id") and stats.id.Value
-                    local isNameMatch = (unitName and unitName ~= "Unit") and (
-                        u.Name:lower() == unitName:lower() or
-                        (uId and tostring(uId):lower() == unitName:lower()) or
-                        u.Name:lower():find(unitName:lower(), 1, true) or
-                        (uId and tostring(uId):lower():find(unitName:lower(), 1, true))
-                    )
-                    if isNameMatch and d < bestMatchDist then
-                        bestMatchDist = d
-                        bestMatchUnit = u
+            if pos and targetPos then
+                local tX = typeof(targetPos) == "Vector3" and targetPos.X or (type(targetPos) == "table" and (targetPos.X or targetPos[1]))
+                local tZ = typeof(targetPos) == "Vector3" and targetPos.Z or (type(targetPos) == "table" and (targetPos.Z or targetPos[3]))
+                if tX and tZ then
+                    -- วัดระยะแบบ 2D (XZ Plane) ป้องกันความต่างของความสูง Y จาก Animation หรือความสูงตัวละคร
+                    local d = (Vector2.new(pos.X, pos.Z) - Vector2.new(tX, tZ)).Magnitude
+                    if d < maxDist then
+                        local uId = stats:FindFirstChild("id") and stats.id.Value
+                        local isNameMatch = (unitName and unitName ~= "Unit") and (
+                            u.Name:lower() == unitName:lower() or
+                            (uId and tostring(uId):lower() == unitName:lower()) or
+                            u.Name:lower():find(unitName:lower(), 1, true) or
+                            (uId and tostring(uId):lower():find(unitName:lower(), 1, true))
+                        )
+                        if isNameMatch and d < bestMatchDist then
+                            bestMatchDist = d
+                            bestMatchUnit = u
+                        end
+                        if d < fallbackDist then
+                            fallbackDist = d
+                            fallbackUnit = u
+                        end
                     end
-                    if d < fallbackDist then
-                        fallbackDist = d
-                        fallbackUnit = u
-                    end
+                end
+            elseif not targetPos and unitName and unitName ~= "Unit" then
+                local uId = stats:FindFirstChild("id") and stats.id.Value
+                if u.Name:lower() == unitName:lower() or (uId and tostring(uId):lower() == unitName:lower()) then
+                    return u
                 end
             end
         end
     end
     return bestMatchUnit or fallbackUnit
 end
-
 
 -- สร้าง Progress Bar สวยงาม
 local function generateProgressBar(current, total, barLength)
@@ -561,14 +548,14 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             local spawnedUnit = nil
             local waitStart = tick()
             while (tick() - waitStart) < 2.0 do
-                if not (macroState and macroState.recording) then return end
+                if not (macroState and macroState.macro) then return end
                 spawnedUnit = findLiveUnitForUpgrade(pos, uName, 6)
                 if spawnedUnit then break end
                 task.wait(0.08)
             end
 
             if spawnedUnit then
-                if not (macroState and macroState.recording) then return end
+                if not (macroState and macroState.macro) then return end
                 local entryData = {
                     type        = "spawn",
                     timestamp   = capTime,
@@ -636,7 +623,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             local confirmedLevel = nil
             local waitStart = tick()
             while (tick() - waitStart) < 1.8 do
-                if not (macroState and macroState.recording) then return end
+                if not (macroState and macroState.macro) then return end
                 local cur = upgObj and upgObj.Value or beforeLevel
                 if cur > beforeLevel then
                     confirmedLevel = cur
@@ -646,7 +633,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             end
 
             if confirmedLevel and confirmedLevel > beforeLevel then
-                if not (macroState and macroState.recording) then return end
+                if not (macroState and macroState.macro) then return end
 
                 -- ตรวจสอบกันบันทึกซ้ำซ้อนในระดับเดียวกันสำหรับตัวละครนี้
                 macroState.recordedLevels = macroState.recordedLevels or {}
@@ -691,6 +678,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
         local pos   = nil
         local uId   = nil
         local uName = "Unit"
+        local debugId = nil
         if typeof(unitModel) == "Instance" then
             pcall(function()
                 local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
@@ -705,6 +693,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             local stats = unitModel:FindFirstChild("_stats")
             uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
             uName = unitModel.Name
+            pcall(function() debugId = unitModel:GetDebugId() end)
         end
 
         local capWave = getWave()
@@ -712,14 +701,13 @@ _G.__AAMacroDispatcher = function(self, method, ...)
         local capGold = getGold()
         local capTime = macroState.startTime and math.floor(tick() - macroState.startTime) or 0
 
-        -- ตรวจสอบว่าตัวละครถูกขายและออกจาก workspace._UNITS จริงก่อนบันทึก
+        -- ตรวจสอบว่าตัวละครถูกขายและออกจาก workspace จริงก่อนบันทึก
         task.spawn(function()
             local sold = false
             local waitStart = tick()
             while (tick() - waitStart) < 2.0 do
-                if not (macroState and macroState.recording) then return end
-                -- เมื่อขายสำเร็จ unitModel จะหลุดออกจาก _UNITS (ไม่ว่าจะไป _DEAD_UNITS หรือถูกทำลาย)
-                if not unitModel or not unitModel.Parent or unitModel.Parent.Name ~= "_UNITS" then
+                if not (macroState and macroState.macro) then return end
+                if not unitModel or not unitModel.Parent or not unitModel:IsDescendantOf(workspace) then
                     sold = true
                     break
                 end
@@ -727,7 +715,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             end
 
             if sold then
-                if not (macroState and macroState.recording) then return end
+                if not (macroState and macroState.macro) then return end
                 local entryData3 = {
                     type        = "sell",
                     timestamp   = capTime,
@@ -737,6 +725,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
                     position    = pos,
                     unitId      = uId,
                     unitName    = uName,
+                    debugId     = debugId,
                     args        = args,
                 }
                 table.insert(macroState.macro, entryData3)
@@ -1020,61 +1009,63 @@ function macro.Play()
                 end
 
             elseif entry.type == "sell" then
+                -- ค้นหา unit ที่ active อยู่ใกล้ตำแหน่งที่บันทึกไว้ และทำการขายพร้อม retry loop
+                local soldSuccess = false
                 local maxSellAttempts = 6
-                local sold = false
-                local targetUnit = nil
 
                 for attempt = 1, maxSellAttempts do
                     if not macro.playing then break end
 
-                    -- ค้นหายูนิตที่ต้องขาย (วัดระยะ XZ 15 studs ป้องกันความคลาดเคลื่อนของความสูง Y)
-                    targetUnit = findLiveUnitForSell(entry.position, entry.unitName, 15)
-                    if not targetUnit and attempt == 1 then
-                        task.wait(0.2)
-                        targetUnit = findLiveUnitForSell(entry.position, entry.unitName, 15)
-                    end
-
-                    if not targetUnit then
-                        -- ถ้าหาไม่เจอตั้งแต่รอบหลัง แสดงว่าขายสำเร็จและหลุดออกจาก _UNITS ไปแล้ว
-                        if attempt > 1 then
-                            sold = true
+                    local liveUnit = findLiveUnitForSell(entry.position, entry.unitName, 10)
+                    if not liveUnit then
+                        if attempt == 1 then
+                            task.wait(0.2)
+                            liveUnit = findLiveUnitForSell(entry.position, entry.unitName, 12)
                         end
-                        break
                     end
 
-                    -- ยิง Remote ขายตัวละคร
-                    local ok2, res2 = pcall(function()
-                        return sellRemote:InvokeServer(targetUnit)
-                    end)
-                    if not ok2 then
-                        warn(string.format("[AA Macro] Sell #%d attempt %d error: %s", i, attempt, tostring(res2)))
-                    end
-
-                    -- ตรวจสอบว่าตัวละครออกจาก workspace._UNITS จริงหรือไม่ (รอสูงสุด 1.2 วินาที)
-                    local checkStart = tick()
-                    while (tick() - checkStart) < 1.2 do
-                        if not targetUnit or not targetUnit.Parent or targetUnit.Parent.Name ~= "_UNITS" then
-                            sold = true
+                    if not liveUnit or not liveUnit.Parent or not liveUnit:IsDescendantOf(workspace) then
+                        if attempt > 1 then
+                            soldSuccess = true
                             break
                         end
-                        task.wait(0.1)
                     end
 
-                    if sold then break end
-                    task.wait(0.25)
+                    if liveUnit and liveUnit.Parent and liveUnit:IsDescendantOf(workspace) then
+                        local ok2, res2 = pcall(function()
+                            return sellRemote:InvokeServer(liveUnit)
+                        end)
+                        if not ok2 then
+                            warn(string.format("[AA Macro] sell #%d attempt %d error: %s", i, attempt, tostring(res2)))
+                        end
+
+                        -- ตรวจสอบว่าโมเดลหลุดออกจาก workspace จริงหรือไม่ (รอสูงสุด 1.2 วินาที)
+                        local checkStart = tick()
+                        while (tick() - checkStart) < 1.2 do
+                            if not liveUnit or not liveUnit.Parent or not liveUnit:IsDescendantOf(workspace) then
+                                soldSuccess = true
+                                break
+                            end
+                            task.wait(0.08)
+                        end
+
+                        if soldSuccess then break end
+                    end
+
+                    task.wait(0.2)
                 end
 
-                if sold then
+                if soldSuccess then
                     Fluent:Notify({
                         Title    = "💰 Sold #"..i,
                         Content  = string.format("%s ขายสำเร็จ!", tostring(entry.unitName)),
                         Duration = 2.5
                     })
                 else
-                    warn(string.format("[AA Macro] Sell #%d FAILED: ไม่สามารถขาย %s ได้ (ยังคงอยู่ใน _UNITS)", i, tostring(entry.unitName)))
+                    warn(string.format("[AA Macro] sell #%d FAILED: %s ไม่สามารถขายได้หรือไม่พบตัวละคร", i, tostring(entry.unitName)))
                     Fluent:Notify({
                         Title    = "❌ Sell Failed #"..i,
-                        Content  = string.format("%s ขายไม่สำเร็จ (ไม่ถูกลบออกจาก _UNITS)", tostring(entry.unitName)),
+                        Content  = string.format("%s ขายไม่สำเร็จ (ไม่หลุดจาก _UNITS)", tostring(entry.unitName)),
                         Duration = 5
                     })
                 end
