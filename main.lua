@@ -442,6 +442,16 @@ local function findLiveUnitForSell(targetPos, unitName, maxDist)
                 end
             end
         end
+    if not bestMatchUnit and not fallbackUnit and unitName and unitName ~= "Unit" then
+        for _, u in ipairs(unitsFolder:GetChildren()) do
+            local stats = u:FindFirstChild("_stats")
+            if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+                local uId = stats:FindFirstChild("id") and stats.id.Value
+                if u.Name:lower() == unitName:lower() or (uId and tostring(uId):lower() == unitName:lower()) or u.Name:lower():find(unitName:lower(), 1, true) then
+                    return u
+                end
+            end
+        end
     end
     return bestMatchUnit or fallbackUnit
 end
@@ -1011,6 +1021,7 @@ function macro.Play()
             elseif entry.type == "sell" then
                 -- ค้นหา unit ที่ active อยู่ใกล้ตำแหน่งที่บันทึกไว้ และทำการขายพร้อม retry loop
                 local soldSuccess = false
+                local didInvoke = false
                 local maxSellAttempts = 6
 
                 for attempt = 1, maxSellAttempts do
@@ -1025,17 +1036,16 @@ function macro.Play()
                     end
 
                     local unitsFolder = workspace:FindFirstChild("_UNITS") or workspace
-                    if not liveUnit or not liveUnit.Parent or liveUnit.Parent.Name == "_DEAD_UNITS" or not liveUnit:IsDescendantOf(unitsFolder) then
-                        if attempt > 1 then
-                            soldSuccess = true
-                            break
-                        end
+                    if didInvoke and (not liveUnit or not liveUnit.Parent or liveUnit.Parent.Name == "_DEAD_UNITS" or not liveUnit:IsDescendantOf(unitsFolder)) then
+                        soldSuccess = true
+                        break
                     end
 
                     if liveUnit and liveUnit.Parent and liveUnit:IsDescendantOf(unitsFolder) and liveUnit.Parent.Name ~= "_DEAD_UNITS" then
                         local ok2, res2 = pcall(function()
                             return sellRemote:InvokeServer(liveUnit)
                         end)
+                        didInvoke = true
                         if not ok2 then
                             warn(string.format("[AA Macro] sell #%d attempt %d error: %s", i, attempt, tostring(res2)))
                         end
