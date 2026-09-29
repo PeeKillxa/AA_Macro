@@ -166,26 +166,56 @@ local function getActiveUnitsCount()
     return count
 end
 
-local function getLiveUnitByPosition(targetPos, maxDist)
+-- ค้นหา unit ของผู้เล่นใน workspace._UNITS ตามตำแหน่งและชื่อตัวละคร (สำหรับ Upgrade & ทั่วไป)
+local function findLiveUnitForUpgrade(targetPos, unitName, maxDist)
     if not targetPos then return nil end
-    maxDist = maxDist or 5
+    maxDist = maxDist or 8
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     if not unitsFolder then return nil end
-    local closestUnit = nil
-    local closestDist = maxDist
+
+    local bestMatchUnit = nil
+    local bestMatchDist = maxDist
+    local fallbackUnit  = nil
+    local fallbackDist  = maxDist
+
     for _, u in ipairs(unitsFolder:GetChildren()) do
         local stats = u:FindFirstChild("_stats")
         if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
-            local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
-            local pos = pPart and pPart.Position or u:GetPivot().Position
-            local d = (pos - targetPos).Magnitude
-            if d < closestDist then
-                closestDist = d
-                closestUnit = u
+            local pos = nil
+            pcall(function()
+                local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
+                if pPart then
+                    pos = pPart.Position
+                elseif u:IsA("Model") then
+                    pos = u:GetPivot().Position
+                end
+            end)
+            if pos then
+                local d = (pos - targetPos).Magnitude
+                if d < maxDist then
+                    local uId = stats:FindFirstChild("id") and stats.id.Value
+                    local isNameMatch = (unitName and unitName ~= "Unit") and (
+                        u.Name:lower() == unitName:lower() or
+                        (uId and tostring(uId):lower() == unitName:lower()) or
+                        u.Name:lower():find(unitName:lower(), 1, true)
+                    )
+                    if isNameMatch and d < bestMatchDist then
+                        bestMatchDist = d
+                        bestMatchUnit = u
+                    end
+                    if d < fallbackDist then
+                        fallbackDist = d
+                        fallbackUnit = u
+                    end
+                end
             end
         end
     end
-    return closestUnit
+    return bestMatchUnit or fallbackUnit
+end
+
+local function getLiveUnitByPosition(targetPos, maxDist, unitName)
+    return findLiveUnitForUpgrade(targetPos, unitName, maxDist or 6)
 end
 
 local function getUpgradeCostFromOverview(targetUnit)
@@ -209,7 +239,7 @@ local function getUpgradeCostFromOverview(targetUnit)
 end
 
 local function getUpgradeCost(entry)
-    local liveUnit = entry and entry.position and getLiveUnitByPosition(entry.position, 6)
+    local liveUnit = entry and entry.position and getLiveUnitByPosition(entry.position, 6, entry.unitName)
 
     if liveUnit then
         local ovCost = getUpgradeCostFromOverview(liveUnit)
@@ -442,31 +472,55 @@ if not _G.__AAMacroHooked then
                 local pos   = nil
                 local uId   = nil
                 local uName = "Unit"
+                local curUpg = 0
+                local maxUpg = nil
                 if typeof(unitModel) == "Instance" then
-                    local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
-                    pos = pPart and pPart.Position or unitModel:GetPivot().Position
+                    pcall(function()
+                        local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+                        if pPart then
+                            pos = pPart.Position
+                        elseif unitModel:IsA("Model") then
+                            pos = unitModel:GetPivot().Position
+                        elseif unitModel:IsA("BasePart") then
+                            pos = unitModel.Position
+                        end
+                    end)
                     local stats = unitModel:FindFirstChild("_stats")
                     uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
                     uName = uId or unitModel.Name
+                    if stats then
+                        if stats:FindFirstChild("upgrade") then
+                            curUpg = stats.upgrade.Value
+                        end
+                        if stats:FindFirstChild("max_upgrade") then
+                            maxUpg = stats.max_upgrade.Value
+                        end
+                    end
                 end
+                local targetUpg = curUpg + 1
                 local entryData2 = {
-                    type        = "upgrade",
-                    timestamp   = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
-                    wave        = getWave(),
-                    waveOffset  = math.floor(getWaveElapsed()),
-                    gold        = getGold(),
-                    position    = pos,
-                    unitId      = uId,
-                    unitName    = uName,
-                    args        = args,
+                    type            = "upgrade",
+                    timestamp       = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
+                    wave            = getWave(),
+                    waveOffset      = math.floor(getWaveElapsed()),
+                    gold            = getGold(),
+                    position        = pos,
+                    unitId          = uId,
+                    unitName        = uName,
+                    currentUpgrade  = curUpg,
+                    targetUpgrade   = targetUpg,
+                    maxUpgrade      = maxUpg,
+                    args            = args,
                 }
                 table.insert(macroState.macro, entryData2)
                 task.defer(function()
                     pcall(function()
                         Fluent:Notify({
                             Title    = string.format("🔴 Recorded #%d: UPGRADE", #macroState.macro),
-                            Content  = string.format("%s\nWave: %d | Gold: %d¥",
-                                uName, entryData2.wave, entryData2.gold),
+                            Content  = string.format("%s [Lvl %d → %d]%s\nWave: %d | Gold: %d¥",
+                                uName, curUpg, targetUpg,
+                                maxUpg and string.format(" (Max: %d)", maxUpg) or "",
+                                entryData2.wave, entryData2.gold),
                             Duration = 3,
                         })
                     end)
@@ -625,18 +679,96 @@ function macro.Play()
                 end
 
             elseif entry.type == "upgrade" then
-                local liveUnit = entry.position and getLiveUnitByPosition(entry.position, 6)
+                local liveUnit = findLiveUnitForUpgrade(entry.position, entry.unitName, 8)
+                if not liveUnit then
+                    for _ = 1, 5 do
+                        task.wait(0.3)
+                        liveUnit = findLiveUnitForUpgrade(entry.position, entry.unitName, 8)
+                        if liveUnit then break end
+                    end
+                end
+
                 if liveUnit then
-                    local ok2, res2 = pcall(function()
-                        return upgradeRemote:InvokeServer(liveUnit)
-                    end)
-                    if not ok2 then
-                        warn("[AA Macro] upgrade #" .. i .. " error: " .. tostring(res2))
+                    local stats = liveUnit:FindFirstChild("_stats")
+                    local upgValObj = stats and stats:FindFirstChild("upgrade")
+                    local maxUpgValObj = stats and stats:FindFirstChild("max_upgrade")
+
+                    local startLvl = upgValObj and upgValObj.Value or 0
+                    local maxLvl = maxUpgValObj and maxUpgValObj.Value or (entry.maxUpgrade or 999)
+                    local targetLvl = entry.targetUpgrade or (startLvl + 1)
+
+                    -- 1. เช็คว่าถึงระดับ Max Upgrade หรือยัง
+                    if startLvl >= maxLvl then
+                        warn(string.format("[AA Macro] Upgrade #%d: %s ถึงระดับสูงสุดแล้ว (%d/%d) — ข้ามไป", i, tostring(entry.unitName), startLvl, maxLvl))
+                        Fluent:Notify({ Title = "⚡ Max Upgrade #"..i, Content = string.format("%s อัปเกรดเต็มแล้ว (%d/%d)", tostring(entry.unitName), startLvl, maxLvl), Duration = 3 })
+                    -- 2. เช็คว่าระดับปัจจุบันถึงเป้าหมายแล้วหรือยัง
+                    elseif startLvl >= targetLvl then
+                        warn(string.format("[AA Macro] Upgrade #%d: %s เลเวลปัจจุบัน (%d) >= เป้าหมาย (%d) — ข้ามไป", i, tostring(entry.unitName), startLvl, targetLvl))
                     else
-                        Fluent:Notify({ Title = "⬆️ Upgraded #"..i, Content = tostring(entry.unitName), Duration = 2.5 })
+                        -- 3. ทำการอัปเกรดและตรวจสอบว่า _stats.upgrade.Value เพิ่มขึ้นจริง
+                        local upgraded = false
+                        local maxAttempts = 6
+
+                        for attempt = 1, maxAttempts do
+                            if not macro.playing then break end
+
+                            -- ตรวจสอบว่าเลเวลขยับแล้วหรือยัง
+                            local currentLvl = upgValObj and upgValObj.Value or startLvl
+                            if currentLvl > startLvl or currentLvl >= targetLvl then
+                                upgraded = true
+                                break
+                            end
+
+                            -- เช็คเงิน ถ้าเงินยังไม่พอ ให้รอจนกว่าจะพอ
+                            while macro.playing and not canAfford(entry) do
+                                task.wait(0.2)
+                            end
+                            if not macro.playing then break end
+
+                            -- ยิง Remote อัปเกรด
+                            local okInvoke, resInvoke = pcall(function()
+                                return upgradeRemote:InvokeServer(liveUnit)
+                            end)
+                            if not okInvoke then
+                                warn(string.format("[AA Macro] Upgrade #%d attempt %d error: %s", i, attempt, tostring(resInvoke)))
+                            end
+
+                            -- รอผลการตอบสนองจากเซิร์ฟเวอร์ ให้ _stats.upgrade.Value อัปเดตจริง (รอสูงสุด 1.2 วินาที)
+                            local checkStart = tick()
+                            while (tick() - checkStart) < 1.2 do
+                                local verifiedLvl = upgValObj and upgValObj.Value or startLvl
+                                if verifiedLvl > startLvl or verifiedLvl >= targetLvl then
+                                    upgraded = true
+                                    break
+                                end
+                                task.wait(0.1)
+                            end
+
+                            if upgraded then break end
+                            task.wait(0.25)
+                        end
+
+                        local finalLvl = upgValObj and upgValObj.Value or startLvl
+                        if upgraded or finalLvl > startLvl then
+                            Fluent:Notify({
+                                Title    = "⬆️ Upgraded #"..i,
+                                Content  = string.format("%s: Lvl %d → %d (Max: %s)",
+                                    tostring(entry.unitName), startLvl, finalLvl,
+                                    maxLvl < 999 and tostring(maxLvl) or "-"),
+                                Duration = 2.5
+                            })
+                        else
+                            warn(string.format("[AA Macro] Upgrade #%d FAILED: %s ไม่สามารถอัปเกรดได้ (ยังอยู่ที่ Lvl %d)", i, tostring(entry.unitName), finalLvl))
+                            Fluent:Notify({
+                                Title    = "❌ Upgrade Failed #"..i,
+                                Content  = string.format("%s อัปเกรดไม่สำเร็จ (เลเวลยังเป็น %d)", tostring(entry.unitName), finalLvl),
+                                Duration = 5
+                            })
+                        end
                     end
                 else
-                    warn("[AA Macro] upgrade #" .. i .. ": unit not found near pos, skipping")
+                    warn("[AA Macro] upgrade #" .. i .. ": unit '" .. tostring(entry.unitName) .. "' not found near pos, skipping")
+                    Fluent:Notify({ Title = "⚠️ Skip Upgrade #"..i, Content = entry.unitName.." ไม่พบตัวละครใกล้พิกัด", Duration = 4 })
                 end
 
             elseif entry.type == "sell" then
@@ -696,6 +828,11 @@ local function serializeMacro()
                 item.cframe = { posCF:GetComponents() }
             end
         end
+        if entry.type == "upgrade" then
+            item.targetUpgrade  = entry.targetUpgrade
+            item.currentUpgrade = entry.currentUpgrade
+            item.maxUpgrade     = entry.maxUpgrade
+        end
         -- sell: บันทึก position เป็น cue หลัก (ไม่มี cframe/args ที่ใช้ได้ข้ามรอบ)
         if entry.type == "sell" and not item.position and entry.position then
             item.position = { entry.position.X, entry.position.Y, entry.position.Z }
@@ -710,14 +847,17 @@ local function deserializeMacro(jsonStr)
     local list = {}
     for _, t in ipairs(rawList) do
         local entry = {
-            type        = t.type,
-            timestamp   = t.timestamp or 0,
-            wave        = t.wave or 0,
-            waveOffset  = t.waveOffset or 0,
-            gold        = t.gold or 0,
-            unitId      = t.unitId or t.unitUuid,
-            unitName    = t.unitName or "Unit",
-            slotIndex   = t.slotIndex,
+            type            = t.type,
+            timestamp       = t.timestamp or 0,
+            wave            = t.wave or 0,
+            waveOffset      = t.waveOffset or 0,
+            gold            = t.gold or 0,
+            unitId          = t.unitId or t.unitUuid,
+            unitName        = t.unitName or "Unit",
+            slotIndex       = t.slotIndex,
+            targetUpgrade   = t.targetUpgrade,
+            currentUpgrade  = t.currentUpgrade,
+            maxUpgrade      = t.maxUpgrade,
         }
         if t.position then
             entry.position = Vector3.new(t.position[1], t.position[2], t.position[3])
@@ -2260,7 +2400,9 @@ local function refreshLogView()
         local ps = v.position
             and string.format("(%.0f, %.0f, %.0f)", v.position.X, v.position.Y, v.position.Z)
             or "N/A"
-        local actIcon = v.type == "spawn" and "SPAWN" or v.type == "sell" and "SELL" or "UPG"
+        local actIcon = v.type == "spawn" and "SPAWN"
+            or v.type == "sell" and "SELL"
+            or (v.targetUpgrade and string.format("UPG:%d", v.targetUpgrade) or "UPG")
         local uName = tostring(v.unitName or "Unit"):sub(1, 10)
         local waveTxt = string.format("W%d+%ds", v.wave or 0, v.waveOffset or 0)
         table.insert(lines, string.format(
@@ -2522,15 +2664,22 @@ task.spawn(function()
                 local nextEntry = macro.macro[macro.currentStep]
                 local actIcon = nextEntry.type == "spawn" and "🎯 SPAWN" or nextEntry.type == "sell" and "💰 SELL" or "⬆️ UPGRADE"
                 local affordable = canAfford(nextEntry)
-                local affStatus = nextEntry.type == "sell" and "🟢 ขายคืนเงิน — พร้อมทำงาน" or (affordable and "🟢 เงินพอ — พร้อมวาง" or "⏳ รอเงินสะสม...")
+                local affStatus = nextEntry.type == "sell" and "🟢 ขายคืนเงิน — พร้อมทำงาน" or (affordable and "🟢 เงินพอ — พร้อมทำงาน" or "⏳ รอเงินสะสม...")
                 local posStr = nextEntry.position and string.format("(%.0f, %.0f, %.0f)", nextEntry.position.X, nextEntry.position.Y, nextEntry.position.Z) or "N/A"
                 local timingStr = macro.playMode == "Wave+Delay"
                     and string.format("Wave ≥ %d + %ds", nextEntry.wave or 0, nextEntry.waveOffset or 0)
                     or  string.format("T ≥ %ds", nextEntry.timestamp or 0)
 
+                local unitInfo = tostring(nextEntry.unitName or "Unit")
+                if nextEntry.type == "upgrade" and nextEntry.targetUpgrade then
+                    unitInfo = string.format("%s (→ Lvl %d)", unitInfo, nextEntry.targetUpgrade)
+                elseif nextEntry.type == "spawn" then
+                    unitInfo = string.format("%s (Slot %s)", unitInfo, tostring(nextEntry.slotIndex or "-"))
+                end
+
                 DashNextActionCard:SetTitle(string.format("🎯 NEXT  [%d/%d]  %s", macro.currentStep, total, actIcon))
                 DashNextActionCard:SetDesc(table.concat({
-                    string.format("• Unit     :  %s  (Slot %s)", tostring(nextEntry.unitName or "Unit"), tostring(nextEntry.slotIndex or "-")),
+                    string.format("• Unit     :  %s", unitInfo),
                     string.format("• Position :  📍 %s", posStr),
                     string.format("• Trigger  :  ⏱️ %s", timingStr),
                     string.format("• Action   :  %s", affStatus),
