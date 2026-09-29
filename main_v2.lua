@@ -672,7 +672,7 @@ _G.__AAMacroDispatcher = function(self, method, ...)
             local waitStart = tick()
             while (tick() - waitStart) < 2.0 do
                 if not (macroState and macroState.macro) then return end
-                if not unitModel or not unitModel.Parent or not unitModel:IsDescendantOf(workspace) then
+                if not unitModel or not unitModel.Parent or unitModel.Parent.Name == "_DEAD_UNITS" or not unitModel:IsDescendantOf(workspace:FindFirstChild("_UNITS") or workspace) then
                     sold = true
                     break
                 end
@@ -983,14 +983,15 @@ function macro.Play()
                         end
                     end
 
-                    if not liveUnit or not liveUnit.Parent or not liveUnit:IsDescendantOf(workspace) then
+                    local unitsFolder = workspace:FindFirstChild("_UNITS") or workspace
+                    if not liveUnit or not liveUnit.Parent or liveUnit.Parent.Name == "_DEAD_UNITS" or not liveUnit:IsDescendantOf(unitsFolder) then
                         if attempt > 1 then
                             soldSuccess = true
                             break
                         end
                     end
 
-                    if liveUnit and liveUnit.Parent and liveUnit:IsDescendantOf(workspace) then
+                    if liveUnit and liveUnit.Parent and liveUnit:IsDescendantOf(unitsFolder) and liveUnit.Parent.Name ~= "_DEAD_UNITS" then
                         local ok2, res2 = pcall(function()
                             return sellRemote:InvokeServer(liveUnit)
                         end)
@@ -998,10 +999,10 @@ function macro.Play()
                             warn(string.format("[AA Macro] sell #%d attempt %d error: %s", i, attempt, tostring(res2)))
                         end
 
-                        -- ตรวจสอบว่าโมเดลหลุดออกจาก workspace จริงหรือไม่ (รอสูงสุด 1.2 วินาที)
+                        -- ตรวจสอบว่าโมเดลหลุดออกจาก _UNITS จริงหรือไม่ (รอสูงสุด 1.2 วินาที)
                         local checkStart = tick()
                         while (tick() - checkStart) < 1.2 do
-                            if not liveUnit or not liveUnit.Parent or not liveUnit:IsDescendantOf(workspace) then
+                            if not liveUnit or not liveUnit.Parent or liveUnit.Parent.Name == "_DEAD_UNITS" or not liveUnit:IsDescendantOf(unitsFolder) then
                                 soldSuccess = true
                                 break
                             end
