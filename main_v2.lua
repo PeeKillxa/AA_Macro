@@ -36,6 +36,7 @@ local plr         = game:GetService("Players").LocalPlayer
 
 local spawnRemote   = RS.endpoints.client_to_server.spawn_unit
 local upgradeRemote = RS.endpoints.client_to_server.upgrade_unit_ingame
+local sellRemote    = RS.endpoints.client_to_server.sell_unit_ingame
 local moneyLabel    = plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money.text
 local unitsFrame    = plr.PlayerGui.spawn_units.Lives.Frame.Units
 
@@ -243,8 +244,62 @@ local function canAfford(entry)
     elseif entry.type == "upgrade" then
         local cost = getUpgradeCost(entry)
         return gold >= cost
+    elseif entry.type == "sell" then
+        return true  -- sell ไม่ต้องใช้เงิน ทำได้เสมอ
     end
     return true
+end
+
+-- ค้นหา nil instance (unit ที่ถูก parented to nil) ตาม Name และ DebugId
+local function findNilUnit(name, debugId)
+    if not getnilinstances then return nil end
+    local ok, result = pcall(function()
+        for _, obj in ipairs(getnilinstances()) do
+            if obj.Name == name and obj:GetDebugId() == debugId then
+                return obj
+            end
+        end
+        return nil
+    end)
+    return ok and result or nil
+end
+
+-- ค้นหา unit ที่ active อยู่ใน workspace._UNITS ตาม position (สำหรับ sell replay)
+local function findLiveUnitForSell(targetPos, unitName, maxDist)
+    if not targetPos then return nil end
+    maxDist = maxDist or 8
+    -- 1. ลองหาจาก workspace._UNITS ก่อน (unit ที่ยังอยู่บนแมพ)
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if unitsFolder then
+        local closestUnit = nil
+        local closestDist = maxDist
+        for _, u in ipairs(unitsFolder:GetChildren()) do
+            local stats = u:FindFirstChild("_stats")
+            if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+                local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
+                local pos = pPart and pPart.Position or u:GetPivot().Position
+                local d = (pos - targetPos).Magnitude
+                if d < closestDist then
+                    closestDist = d
+                    closestUnit = u
+                end
+            end
+        end
+        if closestUnit then return closestUnit end
+    end
+    -- 2. fallback: ค้นหาจาก getnilinstances ตามชื่อ
+    if getnilinstances and unitName and unitName ~= "Unit" then
+        local ok, result = pcall(function()
+            for _, obj in ipairs(getnilinstances()) do
+                if obj.Name == unitName and obj:IsA("Model") then
+                    return obj
+                end
+            end
+            return nil
+        end)
+        if ok and result then return result end
+    end
+    return nil
 end
 
 -- สร้าง Unicode Block Progress Bar แบบคมชัดสไตล์ Cyberpunk
@@ -396,6 +451,45 @@ if not _G.__AAMacroHooked then
                         })
                     end)
                 end)
+            elseif name == "sell_unit_ingame" then
+                local args = {...}
+                local unitModel = args[1]
+                local pos   = nil
+                local uId   = nil
+                local uName = "Unit"
+                local debugId = nil
+                if typeof(unitModel) == "Instance" then
+                    local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+                    pos = pPart and pPart.Position or unitModel:GetPivot().Position
+                    local stats = unitModel:FindFirstChild("_stats")
+                    uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
+                    uName = unitModel.Name  -- ชื่อ Model เช่น "demiurge" ใช้ใน getnilinstances
+                    pcall(function() debugId = unitModel:GetDebugId() end)
+                end
+                local entryData3 = {
+                    type        = "sell",
+                    timestamp   = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
+                    wave        = getWave(),
+                    waveOffset  = math.floor(getWaveElapsed()),
+                    gold        = getGold(),
+                    position    = pos,
+                    unitId      = uId,
+                    unitName    = uName,
+                    debugId     = debugId,  -- เก็บไว้ แต่ไม่ใช้ตอน replay (เปลี่ยนทุกรอบ)
+                    args        = args,
+                }
+                table.insert(macroState.macro, entryData3)
+                task.defer(function()
+                    pcall(function()
+                        Fluent:Notify({
+                            Title    = string.format("🔴 Recorded #%d: SELL", #macroState.macro),
+                            Content  = string.format("💰 Sell: %s\nWave: %d | Gold: %d¥\nPos: %s",
+                                uName, entryData3.wave, entryData3.gold,
+                                pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
+                            Duration = 3,
+                        })
+                    end)
+                end)
             end
         end
         -- !! CRITICAL: คืนค่า namecall method กลับเป็นต้นฉบับ
@@ -516,6 +610,24 @@ function macro.Play()
                 else
                     warn("[AA Macro] upgrade #" .. i .. ": unit not found near pos, skipping")
                 end
+
+            elseif entry.type == "sell" then
+                -- ค้นหา unit ที่ active อยู่ใกล้ตำแหน่งที่บันทึกไว้
+                local liveUnit = findLiveUnitForSell(entry.position, entry.unitName, 8)
+                if liveUnit then
+                    local ok2, res2 = pcall(function()
+                        return sellRemote:InvokeServer(liveUnit)
+                    end)
+                    if not ok2 then
+                        warn("[AA Macro] sell #" .. i .. " error: " .. tostring(res2))
+                        Fluent:Notify({ Title = "❌ Sell Error #"..i, Content = tostring(res2):sub(1,80), Duration = 5 })
+                    else
+                        Fluent:Notify({ Title = "💰 Sold #"..i, Content = tostring(entry.unitName), Duration = 2.5 })
+                    end
+                else
+                    warn("[AA Macro] sell #" .. i .. ": unit '"..tostring(entry.unitName).."' not found near pos, skipping")
+                    Fluent:Notify({ Title = "⚠️ Sell Skip #"..i, Content = entry.unitName.." ไม่พบใกล้ตำแหน่ง", Duration = 4 })
+                end
             end
             task.wait(macro.actionDelay or 0.15)
         end
@@ -555,6 +667,10 @@ local function serializeMacro()
                 local posCF = CFrame.new(entry.position)
                 item.cframe = { posCF:GetComponents() }
             end
+        end
+        -- sell: บันทึก position เป็น cue หลัก (ไม่มี cframe/args ที่ใช้ได้ข้ามรอบ)
+        if entry.type == "sell" and not item.position and entry.position then
+            item.position = { entry.position.X, entry.position.Y, entry.position.Z }
         end
         table.insert(list, item)
     end
@@ -597,6 +713,8 @@ local function deserializeMacro(jsonStr)
             entry.cframe = t.cframe  -- keep raw array เผื่อ fallback อีกครั้ง
             entry.args = { t.unitUuid or entry.unitId, cf }
         elseif t.type == "upgrade" then
+            entry.args = {}
+        elseif t.type == "sell" then
             entry.args = {}
         end
         table.insert(list, entry)
