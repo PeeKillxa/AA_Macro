@@ -47,12 +47,44 @@ local sellRemote    = RS.endpoints.client_to_server.sell_unit_ingame
 local moneyLabel    = plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money.text
 local unitsFrame    = plr.PlayerGui.spawn_units.Lives.Frame.Units
 
--- โหลดฐานข้อมูล Units ผ่าน Loader ของเกม เพื่อดึงราคา Upgrade จริงทุกเลเวล
+-- โหลดฐานข้อมูล Units ผ่าน Loader ของเกม เพื่อดึงราคา Upgrade และ Spawn จริงทุกยูนิต
 local UnitsData = nil
-pcall(function()
-    local loader = require(RS.src.Loader)
-    UnitsData = loader:load_data("Units")
-end)
+local function getUnitsData()
+    if UnitsData then return UnitsData end
+    pcall(function()
+        local src = RS:FindFirstChild("src")
+        local loaderModule = src and (src:FindFirstChild("Loader") or src:FindFirstChild("loader"))
+        if loaderModule then
+            local loader = require(loaderModule)
+            if loader and loader.load_data then
+                UnitsData = loader:load_data("Units")
+            end
+        end
+    end)
+    return UnitsData
+end
+
+local function getUnitUpgradeCostFromData(unitId, targetLevel)
+    local data = getUnitsData()
+    if data and unitId and data[unitId] and data[unitId].upgrade then
+        local info = data[unitId].upgrade[targetLevel]
+        if info and info.cost then
+            return info.cost
+        end
+    end
+    return nil
+end
+
+local function getUnitSpawnCostFromData(unitId)
+    local data = getUnitsData()
+    if data and unitId and data[unitId] and data[unitId].cost then
+        return data[unitId].cost
+    end
+    return nil
+end
+
+-- ดึงฐานข้อมูล Units ทันทีเมื่อเริ่มต้น
+getUnitsData()
 
 -- โฟลเดอร์จัดเก็บข้อมูล
 if not isfolder("AA_Macro") then makefolder("AA_Macro") end
@@ -242,8 +274,24 @@ local function getUpgradeCostFromOverview(targetUnit)
 end
 
 local function getUpgradeCost(entry)
-    local liveUnit = entry and entry.position and getLiveUnitByPosition(entry.position, 6, entry.unitName)
+    local liveUnit = entry and entry.position and getLiveUnitByPosition(entry.position, 8, entry.unitName)
+    local stats = liveUnit and liveUnit:FindFirstChild("_stats")
+    local uId = stats and stats:FindFirstChild("id") and stats.id.Value or (entry and (entry.unitId or entry.unitName))
+    local curUpg = stats and stats:FindFirstChild("upgrade") and stats.upgrade.Value or (entry and entry.currentUpgrade or 0)
+    local targetUpg = entry and entry.targetUpgrade or (curUpg + 1)
 
+    -- 1. จาก Units Database ของเกม (Realtime Loader Data แม่นยำ 100%)
+    local dataCost = getUnitUpgradeCostFromData(uId, targetUpg) or (curUpg and getUnitUpgradeCostFromData(uId, curUpg + 1))
+    if dataCost and dataCost > 0 then
+        return dataCost
+    end
+
+    -- 2. จาก entry.cost ที่บันทึกไว้ตอน record
+    if entry and entry.cost and entry.cost > 0 then
+        return entry.cost
+    end
+
+    -- 3. จาก UnitOverview GUI (ถ้าเปิดอยู่)
     if liveUnit then
         local ovCost = getUpgradeCostFromOverview(liveUnit)
         if ovCost and ovCost > 0 then
@@ -251,25 +299,15 @@ local function getUpgradeCost(entry)
         end
     end
 
-    if liveUnit then
-        local stats = liveUnit:FindFirstChild("_stats")
-        local uId = stats and stats:FindFirstChild("id") and stats.id.Value
-        local curUpg = stats and stats:FindFirstChild("upgrade") and stats.upgrade.Value or 0
-        if UnitsData and uId and UnitsData[uId] and UnitsData[uId].upgrade then
-            local nextInfo = UnitsData[uId].upgrade[curUpg + 1]
-            if nextInfo and nextInfo.cost then
-                return nextInfo.cost
-            end
-        end
-    end
-
+    -- 4. จาก UnitUpgrade GUI (ถ้าเปิดอยู่)
     local ok, val = pcall(function()
         local txt = plr.PlayerGui.UnitUpgrade.Primary.Container.Main.Main.Buttons.Upgrade.Main.Text.Text
         return tonumber((txt:gsub("[^%d]", ""))) or 0
     end)
     if ok and val and val > 0 then return val end
 
-    return (entry and entry.gold) or 0
+    -- สำคัญ: ห้าม fallback เป็น entry.gold (เพราะคือยอดเงินในกระเป๋า ไม่ใช่ราคาอัปเกรด)
+    return 0
 end
 
 local function canAfford(entry)
@@ -278,7 +316,7 @@ local function canAfford(entry)
         local slot = findSlotByUnitId(entry.unitId)
         local cost = slot and getSlotSpawnCost(slot) or 0
         if cost == 0 then
-            cost = entry.gold or 0
+            cost = getUnitSpawnCostFromData(entry.unitId) or (entry.cost or 0)
         end
         return gold >= cost
     elseif entry.type == "upgrade" then
@@ -427,29 +465,52 @@ local function getWaveElapsed()
     return t and (tick() - t) or 0
 end
 
--- Hook __namecall ด้วย hookmetamethod เพื่อความเสถียร 100% ไม่ดรอปแพ็กเก็ต Remote
-if not _G.__AAMacroHooked then
-    _G.__AAMacroHooked = true
-    local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-        local macroState = _G.AAMacro
-        if macroState and macroState.recording and (method == "InvokeServer" or method == "FireServer") then
-            local name = self and self.Name or ""
-            if name == "spawn_unit" then
-                local args  = {...}
-                local cf    = args[2]
-                local pos   = typeof(cf) == "CFrame" and cf.Position
-                           or typeof(cf) == "Vector3" and cf or nil
-                local uUuid = args[1]
-                local slot  = findSlotByUnitId(uUuid)
-                local uName = slot and getSlotUnitName(slot) or "Unit"
+-- Dispatcher สำหรับ Namecall Hook เพื่อให้อัปเดตโค้ดบันทึกได้ทันทีโดยไม่ต้อง Hook ซ้ำ
+_G.__AAMacroDispatcher = function(self, method, ...)
+    local macroState = _G.AAMacro
+    if not (macroState and macroState.recording and (method == "InvokeServer" or method == "FireServer")) then
+        return
+    end
+
+    local name = self and self.Name or ""
+    if name == "spawn_unit" then
+        local args  = {...}
+        local cf    = args[2]
+        local pos   = typeof(cf) == "CFrame" and cf.Position
+                   or typeof(cf) == "Vector3" and cf or nil
+        local uUuid = args[1]
+        local slot  = findSlotByUnitId(uUuid)
+        local uName = slot and getSlotUnitName(slot) or "Unit"
+        local cost  = slot and getSlotSpawnCost(slot) or 0
+        if cost == 0 then
+            cost = getUnitSpawnCostFromData(uName) or 0
+        end
+
+        local capWave = getWave()
+        local capWaveOffset = math.floor(getWaveElapsed())
+        local capGold = getGold()
+        local capTime = macroState.startTime and math.floor(tick() - macroState.startTime) or 0
+
+        -- ตรวจสอบว่าโมเดลยูนิตของผู้เล่นปรากฏขึ้นใน workspace._UNITS จริงก่อนบันทึก
+        task.spawn(function()
+            local spawnedUnit = nil
+            local waitStart = tick()
+            while (tick() - waitStart) < 2.0 do
+                if not (macroState and macroState.recording) then return end
+                spawnedUnit = findLiveUnitForUpgrade(pos, uName, 6)
+                if spawnedUnit then break end
+                task.wait(0.08)
+            end
+
+            if spawnedUnit then
+                if not (macroState and macroState.recording) then return end
                 local entryData = {
                     type        = "spawn",
-                    timestamp   = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
-                    wave        = getWave(),
-                    waveOffset  = math.floor(getWaveElapsed()),
-                    gold        = getGold(),
+                    timestamp   = capTime,
+                    wave        = capWave,
+                    waveOffset  = capWaveOffset,
+                    gold        = capGold,
+                    cost        = cost,
                     position    = pos,
                     unitId      = uUuid,
                     unitName    = uName,
@@ -457,125 +518,186 @@ if not _G.__AAMacroHooked then
                     args        = args,
                 }
                 table.insert(macroState.macro, entryData)
-                task.defer(function()
-                    pcall(function()
-                        Fluent:Notify({
-                            Title    = string.format("🔴 Recorded #%d: SPAWN", #macroState.macro),
-                            Content  = string.format("%s (Slot %s)\nWave: %d | Gold: %d¥\nPos: %s",
-                                uName, tostring(slot),
-                                entryData.wave, entryData.gold,
-                                pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
-                            Duration = 3,
-                        })
-                    end)
-                end)
-            elseif name == "upgrade_unit_ingame" then
-                local args = {...}
-                local unitModel = args[1]
-                local pos   = nil
-                local uId   = nil
-                local uName = "Unit"
-                local curUpg = 0
-                local maxUpg = nil
-                if typeof(unitModel) == "Instance" then
-                    pcall(function()
-                        local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
-                        if pPart then
-                            pos = pPart.Position
-                        elseif unitModel:IsA("Model") then
-                            pos = unitModel:GetPivot().Position
-                        elseif unitModel:IsA("BasePart") then
-                            pos = unitModel.Position
-                        end
-                    end)
-                    local stats = unitModel:FindFirstChild("_stats")
-                    uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
-                    uName = uId or unitModel.Name
-                    if stats then
-                        if stats:FindFirstChild("upgrade") then
-                            curUpg = stats.upgrade.Value
-                        end
-                        if stats:FindFirstChild("max_upgrade") then
-                            maxUpg = stats.max_upgrade.Value
-                        end
-                    end
+                Fluent:Notify({
+                    Title    = string.format("🔴 Recorded #%d: SPAWN", #macroState.macro),
+                    Content  = string.format("%s (Slot %s)\nWave: %d | Gold: %d¥%s\nPos: %s",
+                        uName, tostring(slot),
+                        entryData.wave, entryData.gold,
+                        cost > 0 and string.format(" | Cost: %d¥", cost) or "",
+                        pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
+                    Duration = 3,
+                })
+            end
+        end)
+
+    elseif name == "upgrade_unit_ingame" then
+        local args = {...}
+        local unitModel = args[1]
+        if typeof(unitModel) ~= "Instance" then return end
+
+        local stats = unitModel:FindFirstChild("_stats")
+        local upgObj = stats and stats:FindFirstChild("upgrade")
+        local maxUpgObj = stats and stats:FindFirstChild("max_upgrade")
+        local beforeLevel = upgObj and upgObj.Value or 0
+        local maxUpg = maxUpgObj and maxUpgObj.Value or nil
+        local uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
+        local uName = uId or unitModel.Name
+
+        local pos = nil
+        pcall(function()
+            local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+            if pPart then
+                pos = pPart.Position
+            elseif unitModel:IsA("Model") then
+                pos = unitModel:GetPivot().Position
+            elseif unitModel:IsA("BasePart") then
+                pos = unitModel.Position
+            end
+        end)
+
+        -- เช็คว่าถึงระดับ Max แล้วหรือไม่ ถ้าเต็มแล้วไม่บันทึก
+        if maxUpg and beforeLevel >= maxUpg then
+            return
+        end
+
+        local capWave = getWave()
+        local capWaveOffset = math.floor(getWaveElapsed())
+        local capGold = getGold()
+        local capTime = macroState.startTime and math.floor(tick() - macroState.startTime) or 0
+
+        -- ตรวจสอบว่า _stats.upgrade.Value เพิ่มขึ้นจริงจากเซิร์ฟเวอร์ก่อนบันทึก
+        -- ป้องกันการบันทึกเมื่อเงินไม่พอ, กดรัว, หรือเซิร์ฟเวอร์ไม่อนุมัติ (ไม่นับมั่ว)
+        task.spawn(function()
+            local confirmedLevel = nil
+            local waitStart = tick()
+            while (tick() - waitStart) < 1.8 do
+                if not (macroState and macroState.recording) then return end
+                local cur = upgObj and upgObj.Value or beforeLevel
+                if cur > beforeLevel then
+                    confirmedLevel = cur
+                    break
                 end
-                local targetUpg = curUpg + 1
+                task.wait(0.05)
+            end
+
+            if confirmedLevel and confirmedLevel > beforeLevel then
+                if not (macroState and macroState.recording) then return end
+
+                -- ตรวจสอบกันบันทึกซ้ำซ้อนในระดับเดียวกันสำหรับตัวละครนี้
+                macroState.recordedLevels = macroState.recordedLevels or {}
+                local lastRecorded = macroState.recordedLevels[unitModel] or beforeLevel
+                if confirmedLevel <= lastRecorded and lastRecorded > beforeLevel then
+                    return
+                end
+                macroState.recordedLevels[unitModel] = confirmedLevel
+
+                local cost = getUnitUpgradeCostFromData(uId, confirmedLevel) or 0
                 local entryData2 = {
                     type            = "upgrade",
-                    timestamp       = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
-                    wave            = getWave(),
-                    waveOffset      = math.floor(getWaveElapsed()),
-                    gold            = getGold(),
+                    timestamp       = capTime,
+                    wave            = capWave,
+                    waveOffset      = capWaveOffset,
+                    gold            = capGold,
+                    cost            = cost,
                     position        = pos,
                     unitId          = uId,
                     unitName        = uName,
-                    currentUpgrade  = curUpg,
-                    targetUpgrade   = targetUpg,
+                    currentUpgrade  = beforeLevel,
+                    targetUpgrade   = confirmedLevel,
                     maxUpgrade      = maxUpg,
                     args            = args,
                 }
                 table.insert(macroState.macro, entryData2)
-                task.defer(function()
-                    pcall(function()
-                        Fluent:Notify({
-                            Title    = string.format("🔴 Recorded #%d: UPGRADE", #macroState.macro),
-                            Content  = string.format("%s [Lvl %d → %d]%s\nWave: %d | Gold: %d¥",
-                                uName, curUpg, targetUpg,
-                                maxUpg and string.format(" (Max: %d)", maxUpg) or "",
-                                entryData2.wave, entryData2.gold),
-                            Duration = 3,
-                        })
-                    end)
-                end)
-            elseif name == "sell_unit_ingame" then
-                local args = {...}
-                local unitModel = args[1]
-                local pos   = nil
-                local uId   = nil
-                local uName = "Unit"
-                local debugId = nil
-                if typeof(unitModel) == "Instance" then
-                    pcall(function()
-                        local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
-                        if pPart then
-                            pos = pPart.Position
-                        elseif unitModel:IsA("Model") then
-                            pos = unitModel:GetPivot().Position
-                        elseif unitModel:IsA("BasePart") then
-                            pos = unitModel.Position
-                        end
-                    end)
-                    local stats = unitModel:FindFirstChild("_stats")
-                    uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
-                    uName = unitModel.Name
-                    pcall(function() debugId = unitModel:GetDebugId() end)
+                Fluent:Notify({
+                    Title    = string.format("🔴 Recorded #%d: UPGRADE", #macroState.macro),
+                    Content  = string.format("%s [Lvl %d → %d]%s\nWave: %d | Gold: %d¥%s",
+                        uName, beforeLevel, confirmedLevel,
+                        maxUpg and string.format(" (Max: %d)", maxUpg) or "",
+                        entryData2.wave, entryData2.gold,
+                        cost > 0 and string.format(" | Cost: %d¥", cost) or ""),
+                    Duration = 3,
+                })
+            end
+        end)
+
+    elseif name == "sell_unit_ingame" then
+        local args = {...}
+        local unitModel = args[1]
+        local pos   = nil
+        local uId   = nil
+        local uName = "Unit"
+        local debugId = nil
+        if typeof(unitModel) == "Instance" then
+            pcall(function()
+                local pPart = unitModel.PrimaryPart or unitModel:FindFirstChild("HumanoidRootPart")
+                if pPart then
+                    pos = pPart.Position
+                elseif unitModel:IsA("Model") then
+                    pos = unitModel:GetPivot().Position
+                elseif unitModel:IsA("BasePart") then
+                    pos = unitModel.Position
                 end
+            end)
+            local stats = unitModel:FindFirstChild("_stats")
+            uId = stats and stats:FindFirstChild("id") and stats.id.Value or unitModel.Name
+            uName = unitModel.Name
+            pcall(function() debugId = unitModel:GetDebugId() end)
+        end
+
+        local capWave = getWave()
+        local capWaveOffset = math.floor(getWaveElapsed())
+        local capGold = getGold()
+        local capTime = macroState.startTime and math.floor(tick() - macroState.startTime) or 0
+
+        -- ตรวจสอบว่าตัวละครถูกขายและออกจาก workspace จริงก่อนบันทึก
+        task.spawn(function()
+            local sold = false
+            local waitStart = tick()
+            while (tick() - waitStart) < 2.0 do
+                if not (macroState and macroState.recording) then return end
+                if not unitModel or not unitModel.Parent or not unitModel:IsDescendantOf(workspace) then
+                    sold = true
+                    break
+                end
+                task.wait(0.08)
+            end
+
+            if sold then
+                if not (macroState and macroState.recording) then return end
                 local entryData3 = {
                     type        = "sell",
-                    timestamp   = macroState.startTime and math.floor(tick() - macroState.startTime) or 0,
-                    wave        = getWave(),
-                    waveOffset  = math.floor(getWaveElapsed()),
-                    gold        = getGold(),
+                    timestamp   = capTime,
+                    wave        = capWave,
+                    waveOffset  = capWaveOffset,
+                    gold        = capGold,
                     position    = pos,
                     unitId      = uId,
                     unitName    = uName,
-                    debugId     = debugId,  -- เก็บไว้ แต่ไม่ใช้ตอน replay (เปลี่ยนทุกรอบ)
+                    debugId     = debugId,
                     args        = args,
                 }
                 table.insert(macroState.macro, entryData3)
-                task.defer(function()
-                    pcall(function()
-                        Fluent:Notify({
-                            Title    = string.format("🔴 Recorded #%d: SELL", #macroState.macro),
-                            Content  = string.format("💰 Sell: %s\nWave: %d | Gold: %d¥\nPos: %s",
-                                uName, entryData3.wave, entryData3.gold,
-                                pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
-                            Duration = 3,
-                        })
-                    end)
-                end)
+                Fluent:Notify({
+                    Title    = string.format("🔴 Recorded #%d: SELL", #macroState.macro),
+                    Content  = string.format("💰 Sell: %s\nWave: %d | Gold: %d¥\nPos: %s",
+                        uName, entryData3.wave, entryData3.gold,
+                        pos and string.format("(%.0f,%.0f,%.0f)", pos.X, pos.Y, pos.Z) or "nil"),
+                    Duration = 3,
+                })
             end
+        end)
+    end
+end
+
+-- Hook __namecall ด้วย hookmetamethod เชื่อมโยงผ่าน Dispatcher
+if not _G.__AAMacroHooked or not _G.__AAMacroDispatcherInstalled then
+    _G.__AAMacroHooked = true
+    _G.__AAMacroDispatcherInstalled = true
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if _G.__AAMacroDispatcher then
+            pcall(_G.__AAMacroDispatcher, self, method, ...)
         end
         -- !! CRITICAL: คืนค่า namecall method กลับเป็นต้นฉบับ
         setnamecallmethod(method)
@@ -601,11 +723,12 @@ end
 
 -- ── 6. Macro Control API ────────────────────────────────────
 function macro.StartRecording()
-    macro.macro       = {}
-    macro.recording   = true
-    macro.playing     = false
-    macro.currentStep = 0
-    macro.startTime   = tick()
+    macro.macro          = {}
+    macro.recording      = true
+    macro.playing        = false
+    macro.currentStep    = 0
+    macro.startTime      = tick()
+    macro.recordedLevels = {}
 end
 
 function macro.StopRecording()
@@ -618,12 +741,13 @@ function macro.StopPlay()
 end
 
 function macro.Reset()
-    macro.recording   = false
-    macro.playing     = false
-    macro.currentStep = 0
-    macro.macro       = {}
-    macro.startTime   = nil
+    macro.recording          = false
+    macro.playing            = false
+    macro.currentStep        = 0
+    macro.macro              = {}
+    macro.startTime          = nil
     macro.currentProfileName = "Unsaved"
+    macro.recordedLevels     = {}
 end
 
 function macro.Play()
