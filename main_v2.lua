@@ -218,6 +218,9 @@ local function getLiveUnitByPosition(targetPos, maxDist, unitName)
     return findLiveUnitForUpgrade(targetPos, unitName, maxDist or 6)
 end
 
+-- ตรวจสอบและค้นหายูนิตของผู้เล่นใน _UNITS (ไม่รวม mob ศัตรู)
+local findLivePlayerUnit = findLiveUnitForUpgrade
+
 local function getUpgradeCostFromOverview(targetUnit)
     if not targetUnit then return nil end
     local ok, cost = pcall(function()
@@ -668,13 +671,65 @@ function macro.Play()
                     warn("[AA Macro] Spawn #"..i.." SKIPPED — ไม่มี CFrame/position บันทึกไว้ เนื่องจากไฟล์ profile เก่า ให้อัดใหม่อีกครั้ง")
                     Fluent:Notify({ Title = "⚠️ Skip #"..i, Content = entry.unitName.." ไม่มี CFrame → ข้ามไป (profile เก่า — บันทึกใหม่เพื่อแก้)", Duration = 6 })
                 else
-                    local ok2, res2 = pcall(function()
-                        return spawnRemote:InvokeServer(liveUuid, cf)
-                    end)
-                    if not ok2 then
-                        Fluent:Notify({ Title = "❌ Invoke Error", Content = "Spawn #"..i..": "..tostring(res2):sub(1,80), Duration = 6 })
+                    local targetPos = (typeof(cf) == "CFrame" and cf.Position) or entry.position
+                    local spawnedUnit = nil
+                    local maxSpawnAttempts = 6
+
+                    for attempt = 1, maxSpawnAttempts do
+                        if not macro.playing then break end
+
+                        -- 1. ตรวจสอบว่ามียูนิตของผู้เล่นวางอยู่ที่พิกัดนี้อยู่แล้วหรือไม่ (กรองเฉพาะ _stats.player == plr ไม่นับ mob ศัตรู)
+                        spawnedUnit = findLivePlayerUnit(targetPos, entry.unitName, 5)
+                        if spawnedUnit then break end
+
+                        -- 2. เช็คเงิน ถ้าเงินยังไม่พอ ให้รอจนกว่าเงินจะพอ
+                        while macro.playing and not canAfford(entry) do
+                            task.wait(0.2)
+                        end
+                        if not macro.playing then break end
+
+                        -- 3. อัปเดต liveUuid ก่อนยิงคำสั่ง
+                        liveUuid = findCurrentUuidForSpawn(entry)
+                        if not liveUuid then
+                            warn(string.format("[AA Macro] Spawn #%d: ไม่พบ liveUuid", i))
+                            break
+                        end
+
+                        -- 4. ยิง Remote วางตัวละคร
+                        local okInvoke, resInvoke = pcall(function()
+                            return spawnRemote:InvokeServer(liveUuid, cf)
+                        end)
+                        if not okInvoke then
+                            warn(string.format("[AA Macro] Spawn #%d attempt %d error: %s", i, attempt, tostring(resInvoke)))
+                        end
+
+                        -- 5. ตรวจสอบว่าโมเดลยูนิตของผู้เล่นปรากฏขึ้นใน workspace._UNITS จริงหรือไม่
+                        -- (ตรวจสอบ _stats.player.Value == plr ทุก 0.1s รอสูงสุด 1.2 วินาที โดยไม่ใช้ #GetChildren)
+                        local checkStart = tick()
+                        while (tick() - checkStart) < 1.2 do
+                            spawnedUnit = findLivePlayerUnit(targetPos, entry.unitName, 5)
+                            if spawnedUnit then break end
+                            task.wait(0.1)
+                        end
+
+                        if spawnedUnit then break end
+                        task.wait(0.25)
+                    end
+
+                    if spawnedUnit then
+                        Fluent:Notify({
+                            Title    = "✅ Spawned #"..i,
+                            Content  = string.format("%s (Slot %s)\nตรวจสอบพบตัวละครใน _UNITS สำเร็จ!",
+                                tostring(entry.unitName), tostring(entry.slotIndex or "-")),
+                            Duration = 3
+                        })
                     else
-                        Fluent:Notify({ Title = "✅ Spawned #"..i, Content = string.format("%s (Slot %s)", tostring(entry.unitName), tostring(entry.slotIndex)), Duration = 3 })
+                        warn(string.format("[AA Macro] Spawn #%d FAILED: %s ไม่ปรากฏใน workspace._UNITS", i, tostring(entry.unitName)))
+                        Fluent:Notify({
+                            Title    = "❌ Spawn Failed #"..i,
+                            Content  = string.format("%s วางไม่สำเร็จ (ไม่พบใน _UNITS)", tostring(entry.unitName)),
+                            Duration = 5
+                        })
                     end
                 end
 
