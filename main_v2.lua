@@ -4,6 +4,13 @@
 --  File: AA_Macro/main_v2.lua
 -- ============================================================
 
+-- ── Check Lobby Guard ────────────────────────────────────────
+local LOBBY_PLACE_ID = 8304191830
+if game.PlaceId == LOBBY_PLACE_ID then
+    warn("[AA Macro] ⚠️ ปฏิเสธการรัน: อยู่ใน Lobby (PlaceId: 8304191830) สคริปต์นี้สำหรับแมพต่อสู้เท่านั้นเพื่อความปลอดภัย")
+    return
+end
+
 -- ── 0. Cleanup Previous Window & Overlays ───────────────────
 local gethui = gethui or function() return game:GetService("CoreGui") end
 
