@@ -787,10 +787,13 @@ if not _G.__AASellClickFixInstalled then
                         local mPos = UserInputService:GetMouseLocation()
                         local sp = sell.AbsolutePosition
                         local ss = sell.AbsoluteSize
-                        local pad = 4
+                        local pad = 6
 
                         if mPos.X >= (sp.X - pad) and mPos.X <= (sp.X + ss.X + pad)
                             and mPos.Y >= (sp.Y - pad) and mPos.Y <= (sp.Y + ss.Y + pad) then
+                            pcall(function()
+                                firesignal(sell.MouseButton1Click)
+                            end)
                             pcall(function()
                                 firesignal(sell.Activated)
                             end)
