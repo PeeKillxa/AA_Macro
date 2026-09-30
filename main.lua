@@ -442,6 +442,8 @@ local function findLiveUnitForSell(targetPos, unitName, maxDist)
                 end
             end
         end
+    end
+
     if not bestMatchUnit and not fallbackUnit and unitName and unitName ~= "Unit" then
         for _, u in ipairs(unitsFolder:GetChildren()) do
             local stats = u:FindFirstChild("_stats")
