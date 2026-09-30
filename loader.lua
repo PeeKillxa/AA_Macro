@@ -36,76 +36,50 @@ if not playerGui then
     return
 end
 
--- ตรวจจับ VoteStart หรือห้องต่อสู้ที่เริ่มไปแล้ว
-local voteStart = playerGui:FindFirstChild("VoteStart")
-if not voteStart and not workspace:FindFirstChild("_UNITS") then
-    voteStart = playerGui:WaitForChild("VoteStart", 60)
+-- ตรวจจับ VoteStart: ถ้ายังไม่ขึ้น ให้รอจนกว่าจะขึ้น (รอสูงสุด 120 วินาที)
+local voteStart = playerGui:FindFirstChild("VoteStart") or playerGui:WaitForChild("VoteStart", 120)
+
+if not voteStart then
+    warn("[AA Macro] ⚠️ ไม่พบ VoteStart ในแมพต่อสู้ (หมดเวลา 120s) ยกเลิกการรันสคริปต์เพื่อความปลอดภัย")
+    return
 end
 
-print("[AA Macro] ⚡ ตรวจพบห้องต่อสู้พร้อมทำงาน กำลังโหลดสคริปต์...")
-task.wait(1)
+print("[AA Macro] ⚡ ตรวจพบ VoteStart แล้ว! กำลังเริ่มต้นโหลดสคริปต์...")
+task.wait(1.5) -- หน่วงเวลาเล็กน้อยเพื่อให้ Remote และ GUI ในเกมพร้อมทำงาน 100%
 
 -- ── 4. ดาวน์โหลดและรันเวอร์ชันล่าสุดจาก GitHub ────────────
 local GITHUB_USER   = "PeeKillxa"
 local GITHUB_REPO   = "AA_Macro"
 local GITHUB_BRANCH = "main"
+local REMOTE_URL    = string.format("https://raw.githubusercontent.com/%s/%s/%s/main_v2.lua?t=%d", GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH, tick())
 local LOCAL_PATH    = "AA_Macro/main_v2.lua"
-
-local function fetchLatestScript()
-    -- 1. พยายามดึง Commit SHA ล่าสุดจาก GitHub API เพื่อ bypass CDN Cache 100%
-    local apiUrl = string.format("https://api.github.com/repos/%s/%s/commits/%s", GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH)
-    local apiOk, apiRes = pcall(function()
-        return game:HttpGet(apiUrl)
-    end)
-
-    if apiOk and apiRes then
-        local sha = apiRes:match('"sha"%s*:%s*"([a-f0-9]+)"')
-        if sha and #sha >= 7 then
-            local shaUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/main_v2.lua", GITHUB_USER, GITHUB_REPO, sha)
-            local okSha, contentSha = pcall(function() return game:HttpGet(shaUrl) end)
-            if okSha and contentSha and #contentSha > 1000 and not contentSha:find("404: Not Found") then
-                return contentSha
-            end
-        end
-    end
-
-    -- 2. Fallback: ดึงจาก Branch URL ตรงๆ
-    local branchUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/main_v2.lua?t=%d", GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH, tick())
-    local okBranch, contentBranch = pcall(function() return game:HttpGet(branchUrl) end)
-    if okBranch and contentBranch and #contentBranch > 1000 and not contentBranch:find("404: Not Found") then
-        return contentBranch
-    end
-
-    return nil
-end
 
 local function loadScript()
     -- 1. พยายามดาวน์โหลดเวอร์ชันล่าสุดจาก GitHub
-    local content = fetchLatestScript()
-    if content then
+    local ok, content = pcall(function()
+        return game:HttpGet(REMOTE_URL)
+    end)
+
+    if ok and content and #content > 1000 and not content:find("404: Not Found") then
+        -- บันทึกไฟล์อัปเดตลงเครื่อง
+        pcall(function()
+            if not isfolder("AA_Macro") then makefolder("AA_Macro") end
+            writefile(LOCAL_PATH, content)
+        end)
+
         local fn, err = loadstring(content)
         if fn then
-            pcall(function()
-                if not isfolder("AA_Macro") then makefolder("AA_Macro") end
-                writefile(LOCAL_PATH, content)
-            end)
             print("[AA Macro] ✅ โหลดเวอร์ชันล่าสุดจาก Cloud สำเร็จ!")
             return fn()
         else
-            warn("[AA Macro] ⚠️ เกิดข้อผิดพลาดในการ Compile โค้ดจาก Cloud: " .. tostring(err))
+            warn("[AA Macro] ⚠️ เกิดข้อผิดพลาดในการรันโค้ดจาก Cloud: " .. tostring(err))
         end
     end
 
-    -- 2. Fallback: ถ้าเน็ตติดขัด หรือ Cloud ไม่พร้อม ให้รันจากไฟล์ในเครื่อง
+    -- 2. Fallback: ถ้าเน็ตติดขัด หรือ GitHub ยังไม่เปิด ให้รันจากไฟล์ในเครื่อง
     if isfile and isfile(LOCAL_PATH) then
         print("[AA Macro] 📁 รันสคริปต์จากไฟล์ในเครื่อง (Offline Mode)")
-        local offlineContent = readfile(LOCAL_PATH)
-        local fn, err = loadstring(offlineContent)
-        if fn then
-            return fn()
-        else
-            warn("[AA Macro] ❌ ไฟล์ในเครื่องเกิดข้อผิดพลาด: " .. tostring(err))
-        end
+        return loadstring(readfile(LOCAL_PATH))()
     else
         warn("[AA Macro] ❌ ไม่สามารถโหลดสคริปต์ได้ ตรวจสอบอินเทอร์เน็ตหรือ URL ของ GitHub")
     end
