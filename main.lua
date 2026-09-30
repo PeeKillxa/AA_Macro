@@ -767,6 +767,41 @@ if not _G.__AAMacroHooked or not _G.__AAMacroDispatcherInstalled then
     end))
 end
 
+-- ── 4.1 Fix Roblox UI Hit-testing Bug on Sell Button ─────────
+-- เมื่อผู้เล่นเปิดการตั้งค่า show_upgrade_ui_on_left ตัว Container จะลอยอยู่นอกกรอบ Primary (10x10)
+-- ส่งผลให้เอนจิน Roblox ทิ้ง Mouse Click ทำให้เอาม้าวกดปุ่ม Sell บนหน้าจอไม่ติด
+-- เราดักจับคลิกซ้ายระดับ UserInputService เพื่อยิง Activated ให้ปุ่ม Sell ทันทีเมื่อคลิกโดนพิกัดปุ่ม
+if not _G.__AASellClickFixInstalled then
+    _G.__AASellClickFixInstalled = true
+    task.spawn(function()
+        local UserInputService = game:GetService("UserInputService")
+        local plr = game:GetService("Players").LocalPlayer
+
+        UserInputService.InputBegan:Connect(function(input, processed)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                local playerGui = plr:FindFirstChild("PlayerGui")
+                local ui = playerGui and playerGui:FindFirstChild("UnitUpgrade")
+                if ui and ui.Enabled then
+                    local sell = ui:FindFirstChild("Sell", true)
+                    if sell and sell.Visible then
+                        local mPos = UserInputService:GetMouseLocation()
+                        local sp = sell.AbsolutePosition
+                        local ss = sell.AbsoluteSize
+                        local pad = 4
+
+                        if mPos.X >= (sp.X - pad) and mPos.X <= (sp.X + ss.X + pad)
+                            and mPos.Y >= (sp.Y - pad) and mPos.Y <= (sp.Y + ss.Y + pad) then
+                            pcall(function()
+                                firesignal(sell.Activated)
+                            end)
+                        end
+                    end
+                end
+            end
+        end)
+    end)
+end
+
 -- ── 5. Timing & Trigger Check ───────────────────────────────
 -- ── 5. Timing & Trigger Check ───────────────────────────────
 --
