@@ -737,37 +737,97 @@ end
 -- ── 4.1 Fix Roblox UI Hit-testing Bug on Sell Button ─────────
 -- เมื่อผู้เล่นเปิดการตั้งค่า show_upgrade_ui_on_left ตัว Container จะลอยอยู่นอกกรอบ Primary (10x10)
 -- ส่งผลให้เอนจิน Roblox ทิ้ง Mouse Click ทำให้เอาม้าวกดปุ่ม Sell บนหน้าจอไม่ติด
--- เราดักจับคลิกซ้ายระดับ UserInputService เพื่อยิง Activated ให้ปุ่ม Sell ทันทีเมื่อคลิกโดนพิกัดปุ่ม
+-- เมื่อผู้เล่นคลิกปุ่ม Sell ใน UnitUpgrade ไม่ว่าจะเปิดหรือปิด show_upgrade_ui_on_left
+-- เอนจิน Roblox มักดรอปการคลิกเมาส์เพราะ Primary (10x10) หรือ Inset Offset
+-- เราดักจับคลิกซ้ายระดับ UserInputService และ Mouse.Button1Down
+-- ตรวจสอบพิกัดเมาส์ทั้งแบบมี Inset และไม่มี Inset แล้วยิง Action ให้ปุ่ม Sell ทันที
 if not _G.__AASellClickFixInstalled then
     _G.__AASellClickFixInstalled = true
     task.spawn(function()
         local UserInputService = game:GetService("UserInputService")
+        local GuiService = game:GetService("GuiService")
         local plr = game:GetService("Players").LocalPlayer
+        local mouse = plr:GetMouse()
+        local lastTriggerT = 0
 
-        UserInputService.InputBegan:Connect(function(input, processed)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                local playerGui = plr:FindFirstChild("PlayerGui")
-                local ui = playerGui and playerGui:FindFirstChild("UnitUpgrade")
-                if ui and ui.Enabled then
-                    local sell = ui:FindFirstChild("Sell", true)
-                    if sell and sell.Visible then
-                        local mPos = UserInputService:GetMouseLocation()
-                        local sp = sell.AbsolutePosition
-                        local ss = sell.AbsoluteSize
-                        local pad = 6
-
-                        if mPos.X >= (sp.X - pad) and mPos.X <= (sp.X + ss.X + pad)
-                            and mPos.Y >= (sp.Y - pad) and mPos.Y <= (sp.Y + ss.Y + pad) then
-                            pcall(function()
-                                firesignal(sell.MouseButton1Click)
-                            end)
-                            pcall(function()
-                                firesignal(sell.Activated)
-                            end)
-                        end
+        local function getUnitUpgradeController()
+            for _, obj in ipairs(getgc(true)) do
+                if type(obj) == "table" and rawget(obj, "screenGUI") then
+                    local sg = rawget(obj, "screenGUI")
+                    if typeof(sg) == "Instance" and sg.Name == "UnitUpgrade" and typeof(obj.on_click_sell) == "function" then
+                        return obj
                     end
                 end
             end
+            return nil
+        end
+
+        local function checkAndTriggerSell()
+            local now = tick()
+            if now - lastTriggerT < 0.25 then return end
+
+            local playerGui = plr:FindFirstChild("PlayerGui")
+            local ui = playerGui and playerGui:FindFirstChild("UnitUpgrade")
+            if not ui or not ui.Enabled then return end
+
+            local sell = ui:FindFirstChild("Sell", true)
+            if not sell or not sell.Visible then return end
+
+            local sp = sell.AbsolutePosition
+            local ss = sell.AbsoluteSize
+            local pad = 12
+
+            local inset = GuiService:GetGuiInset()
+            local uisRaw = UserInputService:GetMouseLocation()
+            local uisAdj = uisRaw - inset
+            local mX, mY = mouse.X, mouse.Y
+
+            local hit = false
+            if mX >= (sp.X - pad) and mX <= (sp.X + ss.X + pad)
+                and mY >= (sp.Y - pad) and mY <= (sp.Y + ss.Y + pad) then
+                hit = true
+            end
+
+            if not hit and uisAdj.X >= (sp.X - pad) and uisAdj.X <= (sp.X + ss.X + pad)
+                and uisAdj.Y >= (sp.Y - pad) and uisAdj.Y <= (sp.Y + ss.Y + pad) then
+                hit = true
+            end
+
+            if not hit and uisRaw.X >= (sp.X - pad) and uisRaw.X <= (sp.X + ss.X + pad)
+                and uisRaw.Y >= (sp.Y - pad) and uisRaw.Y <= (sp.Y + ss.Y + pad) then
+                hit = true
+            end
+
+            if hit then
+                lastTriggerT = now
+                local ctrl = getUnitUpgradeController()
+                if ctrl and ctrl.screenGUI.Enabled and ctrl.unit_char then
+                    pcall(function()
+                        ctrl:on_click_sell()
+                    end)
+                end
+
+                pcall(function() firesignal(sell.MouseButton1Click) end)
+                pcall(function() firesignal(sell.Activated) end)
+
+                pcall(function()
+                    for _, c in ipairs(getconnections(sell.Activated)) do
+                        if c.Enabled and typeof(c.Fire) == "function" then
+                            c:Fire()
+                        end
+                    end
+                end)
+            end
+        end
+
+        UserInputService.InputBegan:Connect(function(input, processed)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                checkAndTriggerSell()
+            end
+        end)
+
+        mouse.Button1Down:Connect(function()
+            checkAndTriggerSell()
         end)
     end)
 end
