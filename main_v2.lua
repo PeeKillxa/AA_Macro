@@ -2787,7 +2787,14 @@ function macro.GetAvailableSpot(isHill)
         if hillFolder then
             for _, p in ipairs(hillFolder:GetChildren()) do
                 if p:IsA("BasePart") then
-                    local spotPos = Vector3.new(p.Position.X, p.Position.Y + (p.Size.Y / 2) + 0.15, p.Position.Z)
+                    -- ยิง Raycast ลงหาผิวด้านบนของ Part เพื่อหาพิกัดจริงที่เซิร์ฟเวอร์ยอมรับ
+                    local rayPos = p.Position + Vector3.new(0, 4, 0)
+                    local params = RaycastParams.new()
+                    params.FilterType = Enum.RaycastFilterType.Include
+                    params.FilterDescendantsInstances = {p}
+                    local hit = workspace:Raycast(rayPos, Vector3.new(0, -8, 0), params)
+                    local spotPos = hit and hit.Position or Vector3.new(p.Position.X, p.Position.Y + (p.Size.Y / 2) + 0.1, p.Position.Z)
+
                     if not isPositionOccupied(spotPos, 3.5) then
                         return CFrame.new(spotPos), p
                     end
