@@ -47,8 +47,9 @@ local endpoints     = RS:FindFirstChild("endpoints") and RS.endpoints:FindFirstC
 local spawnRemote   = endpoints and endpoints:FindFirstChild("spawn_unit")
 local upgradeRemote = endpoints and endpoints:FindFirstChild("upgrade_unit_ingame")
 local sellRemote        = endpoints and endpoints:FindFirstChild("sell_unit_ingame")
-local useSpellRemote    = endpoints and endpoints:FindFirstChild("use_ingame_spell")
-local deleteSpellRemote = endpoints and endpoints:FindFirstChild("delete_ingame_spell")
+local useSpellRemote        = endpoints and endpoints:FindFirstChild("use_ingame_spell")
+local deleteSpellRemote     = endpoints and endpoints:FindFirstChild("delete_ingame_spell")
+local deleteTempUnitRemote  = endpoints and endpoints:FindFirstChild("delete_ingame_temporary_unit")
 local moneyLabel    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Resource") and plr.PlayerGui.spawn_units.Lives.Frame.Resource:FindFirstChild("Money") and plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money:FindFirstChild("text")
 local unitsFrame    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Units")
 
@@ -3014,6 +3015,50 @@ function macro.HandleInGameSpells()
         if not liveKeys[k] then macro.unitBuffRecords.random_buff[k] = nil end
     end
 
+    local currentActive = getActiveUnitsCount()
+    local maxLimit = tonumber(macro.aiMaxUnits) or 20
+
+    -- ถ้าวางครบ 20 ตัวแล้ว ให้กดกากบาท (X) ลบการ์ดตัวละครออกจากช่อง เพื่อหาการ์ด Spell ทันที!
+    if currentActive >= maxLimit and macro.autoDiscardUnitsWhenMax ~= false then
+        for _, ch in ipairs(unitsFrame:GetChildren()) do
+            if ch:IsA("ImageButton") then
+                local isSpell = (ch:FindFirstChild("SpellName") ~= nil) or (ch.Name == "GameSpellFrame")
+                local unitUuid = ch:GetAttribute("_equipped_frame_unit_uuid")
+                local isUnitCard = (not isSpell) and (unitUuid ~= nil or tonumber(ch.Name) ~= nil)
+
+                if isUnitCard then
+                    local slotKey = (tonumber(ch.Name) and tostring(ch.Name)) or (ch.LayoutOrder and tostring(ch.LayoutOrder)) or tostring(ch.Name)
+                    local delBtn = ch:FindFirstChild("Delete")
+                    local deleted = false
+
+                    if delBtn and delBtn.Visible and firesignal then
+                        pcall(function()
+                            firesignal(delBtn.Activated)
+                            pcall(function() firesignal(delBtn.MouseButton1Click) end)
+                        end)
+                        deleted = true
+                    end
+
+                    if deleteTempUnitRemote then
+                        pcall(function()
+                            deleteTempUnitRemote:InvokeServer(slotKey)
+                        end)
+                        deleted = true
+                    end
+
+                    if deleted then
+                        actionsDone = actionsDone + 1
+                        Fluent:Notify({
+                            Title    = "🗑️ Clear Hand Unit (20/20)",
+                            Content  = string.format("ลบตัวละครออกจากช่อง %s เพื่อเปิดทางหา Spell!", slotKey),
+                            Duration = 2.0,
+                        })
+                    end
+                end
+            end
+        end
+    end
+
     local gold = getGold()
     local actionsDone = 0
 
@@ -3070,21 +3115,20 @@ function macro.HandleInGameSpells()
 
                 -- 2. บัพ Merge:
                 -- กฎ: ใส่ให้ทีละตัวจนครบทุกตัว ถ้าครบแล้วหรือไม่มีตัวให้ใส่ ➔ กดทิ้งทันที
-                -- ข้อห้าม: Merge และ Random Buff ห้ามซ้ำกับตัวเดียวกัน!
+                -- Merge กับ Random Buff ทับกันได้!
                 elseif spellLower:find("merge") or spellLower:find("sacrifice") then
                     local eligibleList = {}
                     for _, uItem in ipairs(playerUnits) do
                         local hasMerge = macro.unitBuffRecords.merge[uItem.key]
-                        local hasRandBuff = macro.unitBuffRecords.random_buff[uItem.key]
-                        -- ห้ามใส่ตัวที่เคยได้ Merge และห้ามใส่ตัวที่เคยได้ Random Buff
-                        if not hasMerge and not hasRandBuff then
+                        -- ตัวไหนยังไม่ได้ Merge ก็มีสิทธิ์รับได้ แม้จะมี Random Buff แล้วก็ตาม (ทับกันได้)
+                        if not hasMerge then
                             table.insert(eligibleList, uItem)
                         end
                     end
 
                     if #eligibleList == 0 then
-                        -- ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว ➔ กดทิ้งทันที!
-                        discardSpell("ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว")
+                        -- ยูนิตทุกตัวในสนามได้รับบัพ Merge ครบหมดแล้ว ➔ กดทิ้งทันที!
+                        discardSpell("ยูนิตทุกตัวในสนามได้รับบัพ Merge ครบหมดแล้ว")
                     else
                         -- เรียงลำดับ: ให้ตัวดาเมจก่อนตัวเงิน -> ดาเมจสูงสุดก่อน
                         table.sort(eligibleList, function(a, b)
@@ -3105,7 +3149,7 @@ function macro.HandleInGameSpells()
                                     actionsDone = actionsDone + 1
                                     Fluent:Notify({
                                         Title    = "🔮 Used Spell: Merge",
-                                        Content  = string.format("ใส่ Merge ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มีบัพเหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
+                                        Content  = string.format("ใส่ Merge ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มี Merge เหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
                                         Duration = 3,
                                     })
                                     macro.aiStatusText = string.format("🔮 ใส่ Merge ให้ %s", target.name)
@@ -3117,22 +3161,21 @@ function macro.HandleInGameSpells()
                     end
 
                 -- 3. บัพ Random Buff:
-                -- กฎ: ใส่ให้ทีละตัว ห้ามซ้ำกับตัวที่มี Random Buff หรือ Merge แล้ว
-                -- ถ้าครบทุกตัวแล้ว ➔ กดทิ้งทันที!
+                -- กฎ: ใส่ให้ทีละตัวจนครบทุกตัว ถ้าครบแล้ว ➔ กดทิ้งทันที
+                -- Merge กับ Random Buff ทับกันได้!
                 elseif spellLower:find("random buff") or spellLower:find("random_buff") then
                     local eligibleList = {}
                     for _, uItem in ipairs(playerUnits) do
-                        local hasMerge = macro.unitBuffRecords.merge[uItem.key]
                         local hasRandBuff = macro.unitBuffRecords.random_buff[uItem.key]
-                        -- ห้ามใส่ตัวที่เคยได้ Random Buff และห้ามใส่ตัวที่เคยได้ Merge
-                        if not hasRandBuff and not hasMerge then
+                        -- ตัวไหนยังไม่ได้ Random Buff ก็มีสิทธิ์รับได้ แม้จะมี Merge แล้วก็ตาม (ทับกันได้)
+                        if not hasRandBuff then
                             table.insert(eligibleList, uItem)
                         end
                     end
 
                     if #eligibleList == 0 then
-                        -- ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว ➔ กดทิ้งทันที!
-                        discardSpell("ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว")
+                        -- ยูนิตทุกตัวในสนามได้รับ Random Buff ครบหมดแล้ว ➔ กดทิ้งทันที!
+                        discardSpell("ยูนิตทุกตัวในสนามได้รับ Random Buff ครบหมดแล้ว")
                     else
                         -- เรียงลำดับ: ให้ตัวดาเมจก่อนตัวเงิน -> ดาเมจสูงสุดก่อน
                         table.sort(eligibleList, function(a, b)
@@ -3153,7 +3196,7 @@ function macro.HandleInGameSpells()
                                     actionsDone = actionsDone + 1
                                     Fluent:Notify({
                                         Title    = "✨ Used Spell: Random Buff",
-                                        Content  = string.format("ใส่ Random Buff ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มีบัพเหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
+                                        Content  = string.format("ใส่ Random Buff ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มี Random Buff เหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
                                         Duration = 3,
                                     })
                                     macro.aiStatusText = string.format("✨ ใส่ Random Buff ให้ %s", target.name)
@@ -3711,7 +3754,7 @@ Tabs.Event:AddButton({
 
 local AutoHandleSpellsToggle = Tabs.Event:AddToggle("AutoHandleSpellsToggle", {
     Title       = "จัดการสเปลและบัพอัตโนมัติ (Auto Handle Spells)",
-    Description = "Merge ทีละตัวจนครบ (ครบแล้วกดทิ้ง) / Clone ตัวดาเมจสูงสุด / Random Buff ไม่ซ้ำกับ Merge",
+    Description = "Merge ทีละตัวจนครบ (ทับกับ Random Buff ได้) / Clone ตัวดาเมจสูงสุด / ลบยูนิตเมื่อครบ 20 ตัวเพื่อหา Spell",
     Default     = macro.autoHandleSpells ~= false,
 })
 
@@ -3726,6 +3769,23 @@ AutoHandleSpellsToggle:OnChanged(function()
     })
 end)
 
+local AutoDiscardUnitsToggle = Tabs.Event:AddToggle("AutoDiscardUnitsToggle", {
+    Title       = "ลบยูนิตในมือเมื่อครบ 20 ตัวเพื่อหา Spell (Clear Hand for Spells)",
+    Description = "เมื่อวางครบ 20 ตัวแล้ว จะกดกากบาท (X) ลบตัวละครออกจากช่องมือเพื่อเปิดทางให้การ์ด Spell เกิด",
+    Default     = macro.autoDiscardUnitsWhenMax ~= false,
+})
+
+AutoDiscardUnitsToggle:OnChanged(function()
+    macro.autoDiscardUnitsWhenMax = Fluent.Options.AutoDiscardUnitsToggle.Value
+    macro.SaveSettings()
+    updateAIStatus()
+    Fluent:Notify({
+        Title   = "Auto Clear Hand Units",
+        Content = macro.autoDiscardUnitsWhenMax and "🟢 เปิดใช้งานลบยูนิตในมือเมื่อครบ 20 ตัว" or "🔴 ปิดใช้งานลบยูนิตในมือ",
+        Duration = 3,
+    })
+end)
+
 Tabs.Event:AddButton({
     Title       = "🔮 จัดการสเปลทันที (Force Handle Spells Now)",
     Description = "สั่งให้ AI ใช้งาน Merge / Clone / Random Buff หรือกดทิ้งใบที่ไม่จำเป็นทันที",
@@ -3734,6 +3794,42 @@ Tabs.Event:AddButton({
         Fluent:Notify({
             Title   = "Spells Result",
             Content = count > 0 and string.format("ดำเนินการจัดการสเปลเรียบร้อย (%d รายการ)", count) or "ไม่พบสเปลที่ดำเนินการได้ในขณะนี้",
+            Duration = 2.5,
+        })
+    end,
+})
+
+Tabs.Event:AddButton({
+    Title       = "🗑️ เคลียร์ยูนิตในมือทันที (Force Clear Hand Units)",
+    Description = "กดกากบาท (X) ลบการ์ดตัวละครทั้งหมดออกจากช่องมือทันที เพื่อหาการ์ด Spell",
+    Callback    = function()
+        local cleared = 0
+        for _, ch in ipairs(unitsFrame:GetChildren()) do
+            if ch:IsA("ImageButton") then
+                local isSpell = (ch:FindFirstChild("SpellName") ~= nil) or (ch.Name == "GameSpellFrame")
+                local unitUuid = ch:GetAttribute("_equipped_frame_unit_uuid")
+                local isUnitCard = (not isSpell) and (unitUuid ~= nil or tonumber(ch.Name) ~= nil)
+                if isUnitCard then
+                    local slotKey = (tonumber(ch.Name) and tostring(ch.Name)) or (ch.LayoutOrder and tostring(ch.LayoutOrder)) or tostring(ch.Name)
+                    local delBtn = ch:FindFirstChild("Delete")
+                    if delBtn and delBtn.Visible and firesignal then
+                        pcall(function()
+                            firesignal(delBtn.Activated)
+                            pcall(function() firesignal(delBtn.MouseButton1Click) end)
+                        end)
+                    end
+                    if deleteTempUnitRemote then
+                        pcall(function()
+                            deleteTempUnitRemote:InvokeServer(slotKey)
+                        end)
+                    end
+                    cleared = cleared + 1
+                end
+            end
+        end
+        Fluent:Notify({
+            Title   = "Clear Hand Result",
+            Content = cleared > 0 and string.format("ลบตัวละครออกจากมือ %d ช่องเรียบร้อย!", cleared) or "ไม่พบการ์ดตัวละครในมือ",
             Duration = 2.5,
         })
     end,
