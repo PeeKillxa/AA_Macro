@@ -422,12 +422,14 @@ _G.AAMacro = {
     actionDelay        = 0.15,
     autoReplay         = true,
     replayDelay        = 2.0,
-    autoStartOnMatch   = false,
-    _replaying         = false,
-    _hasAutoStarted    = false,
-    _hasVotedStart     = false,
-    showHUD            = true,
-    currentProfileName = savedProfile,
+    autoStartOnMatch       = false,
+    autoVoteStart          = true,
+    autoPlayMacroOnMatch   = false,
+    _replaying             = false,
+    _hasAutoStarted        = false,
+    _hasVotedStart         = false,
+    showHUD                = true,
+    currentProfileName     = savedProfile,
     -- ── Webhook Configuration ───────────────────
     webhookUrl             = "",
     webhookEnabled         = false,
@@ -436,12 +438,16 @@ _G.AAMacro = {
     _matchStartTime        = nil,
     _hasSentMatchWebhook   = false,
     _lastWebhookStatus     = "ยังไม่มีการส่ง",
-    -- ── April Fool's Event ──────────────────────
+    -- ── April Fool's Event & AI Autoplay ────────
     eventAutoPlay          = false,
     eventInterval          = 3.0,
     eventAttempts          = 0,
     eventLastCaptcha       = "-",
     eventStatusText        = "⏹️ STANDBY — รอคำสั่ง",
+    aiAutoplay             = false,
+    aiMaxUnits             = 6,
+    aiInterval             = 1.5,
+    aiStatusText           = "AI Standby",
 }
 local macro = _G.AAMacro
 
@@ -1138,17 +1144,21 @@ function macro.SaveSettings()
     pcall(function()
         if not isfolder("AA_Macro") then makefolder("AA_Macro") end
         local cfg = {
-            autoStartOnMatch   = macro.autoStartOnMatch,
-            autoReplay         = macro.autoReplay,
-            playMode           = macro.playMode,
-            actionDelay        = macro.actionDelay,
-            replayDelay        = macro.replayDelay,
-            showHUD            = macro.showHUD,
-            currentProfileName = macro.currentProfileName,
-            webhookUrl         = macro.webhookUrl or "",
-            webhookEnabled     = macro.webhookEnabled or false,
-            webhookNotifyOnFinish = macro.webhookNotifyOnFinish ~= false,
-            webhookCensorUser  = macro.webhookCensorUser or false,
+            autoStartOnMatch       = macro.autoStartOnMatch,
+            autoVoteStart          = macro.autoVoteStart,
+            autoPlayMacroOnMatch   = macro.autoPlayMacroOnMatch,
+            aiAutoplay             = macro.aiAutoplay,
+            aiMaxUnits             = macro.aiMaxUnits or 6,
+            autoReplay             = macro.autoReplay,
+            playMode               = macro.playMode,
+            actionDelay            = macro.actionDelay,
+            replayDelay            = macro.replayDelay,
+            showHUD                = macro.showHUD,
+            currentProfileName     = macro.currentProfileName,
+            webhookUrl             = macro.webhookUrl or "",
+            webhookEnabled         = macro.webhookEnabled or false,
+            webhookNotifyOnFinish  = macro.webhookNotifyOnFinish ~= false,
+            webhookCensorUser      = macro.webhookCensorUser or false,
         }
         writefile(settingsPath, HttpService:JSONEncode(cfg))
     end)
@@ -1160,6 +1170,10 @@ function macro.LoadSettings()
             local raw = readfile(settingsPath)
             local data = HttpService:JSONDecode(raw)
             if type(data) == "table" then
+                if data.autoVoteStart ~= nil then macro.autoVoteStart = data.autoVoteStart end
+                if data.autoPlayMacroOnMatch ~= nil then macro.autoPlayMacroOnMatch = data.autoPlayMacroOnMatch end
+                if data.aiAutoplay ~= nil then macro.aiAutoplay = data.aiAutoplay end
+                if data.aiMaxUnits ~= nil then macro.aiMaxUnits = tonumber(data.aiMaxUnits) or 6 end
                 if data.autoStartOnMatch ~= nil then macro.autoStartOnMatch = data.autoStartOnMatch end
                 if data.autoReplay ~= nil then macro.autoReplay = data.autoReplay end
                 if data.playMode ~= nil then macro.playMode = data.playMode end
@@ -2213,17 +2227,29 @@ Tabs.Macro:AddSlider("MacroReplayDelay", {
     end,
 })
 
-Tabs.Macro:AddToggle("MacroAutoStart", {
-    Title       = "Auto Start เมื่อเริ่มด่านใหม่",
-    Description = "โหวตเริ่มเกมอัตโนมัติ (VoteStart Yes) + เริ่มเล่น Macro อัตโนมัติเมื่อเข้าด่าน",
-    Default     = macro.autoStartOnMatch,
+Tabs.Macro:AddToggle("MacroAutoVoteStart", {
+    Title       = "Auto Vote Start (โหวตเริ่มเกมทันที)",
+    Description = "โหวตเริ่มเกม (VoteStart Yes) ทันทีที่เข้าด่านใหม่ (ไม่เกี่ยวกับมาโคร ไม่สั่งรันมาโครเอง)",
+    Default     = macro.autoVoteStart ~= false,
     Callback    = function(val)
-        macro.autoStartOnMatch = val
+        macro.autoVoteStart = val
+        macro.autoStartOnMatch = val -- backward compatibility
         macro.SaveSettings()
         if val then
             macro.CheckAndVoteStart()
         end
-        Fluent:Notify({ Title = "Auto Start", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
+        Fluent:Notify({ Title = "Auto Vote Start", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
+    end,
+})
+
+Tabs.Macro:AddToggle("MacroAutoPlayOnStart", {
+    Title       = "Auto Play Macro on Wave 1 (เล่นมาโครอัตโนมัติ)",
+    Description = "สั่งกด Play เล่นโปรไฟล์มาโครอัตโนมัติเมื่อ Wave 1 เริ่มต้น (ปิดไว้ถ้าเล่นโหมดสุ่มตัวละคร/AI)",
+    Default     = macro.autoPlayMacroOnMatch == true,
+    Callback    = function(val)
+        macro.autoPlayMacroOnMatch = val
+        macro.SaveSettings()
+        Fluent:Notify({ Title = "Auto Play Macro", Content = val and "🟢 เปิดใช้งาน (บันทึกแล้ว)" or "🔴 ปิด (บันทึกแล้ว)", Duration = 2 })
     end,
 })
 
@@ -2677,6 +2703,332 @@ task.spawn(function()
                 runEventSequence()
             end)
             task.wait(macro.eventInterval or 3)
+        else
+            task.wait(1.0)
+        end
+    end
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- ── 11.2. AI AUTOPLAY ENGINE (โหมดสุ่มตัวละคร / April Fool's)
+-- ────────────────────────────────────────────────────────────
+local function isPositionOccupied(targetPos, maxDist)
+    maxDist = maxDist or 3.5
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return false end
+    for _, u in ipairs(unitsFolder:GetChildren()) do
+        local stats = u:FindFirstChild("_stats")
+        if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+            local pos = nil
+            pcall(function()
+                local pPart = u.PrimaryPart or u:FindFirstChild("HumanoidRootPart")
+                if pPart then
+                    pos = pPart.Position
+                elseif u:IsA("Model") then
+                    pos = u:GetPivot().Position
+                end
+            end)
+            if pos and (pos - targetPos).Magnitude < maxDist then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function macro.GetEquippedUnits()
+    local units = {}
+    if not unitsFrame then return units end
+    local allUnitsData = getUnitsData()
+
+    for _, ch in ipairs(unitsFrame:GetChildren()) do
+        if ch:IsA("ImageButton") and ch.Name ~= "GameSpellFrame" then
+            local view = ch:FindFirstChild("Main") and ch.Main:FindFirstChild("View")
+            local wm = view and view:FindFirstChild("WorldModel")
+            local m = wm and wm:GetChildren()[1]
+            local modelName = m and m.Name or nil
+
+            if modelName then
+                local unitId = modelName:gsub("_unit$", "")
+                local data = allUnitsData and (allUnitsData[unitId] or allUnitsData[modelName])
+
+                local costFrame = ch:FindFirstChild("Cost")
+                local costText = costFrame and costFrame:FindFirstChild("text") and costFrame.text.Text
+                local cost = tonumber((tostring(costText):gsub("[^%d]", ""))) or (data and data.cost or 0)
+
+                -- ตรวจสอบคุณสมบัติ hill_unit (ถ้าเป็น true คือตัววางบนอาคาร/สิ่งก่อสร้าง/Hill)
+                local isHill = (data and data.hill_unit == true) or false
+                local uuid = ch:GetAttribute("_equipped_frame_unit_uuid")
+
+                table.insert(units, {
+                    slot          = ch.Name,
+                    slotNum       = tonumber(ch.Name) or 99,
+                    uuid          = uuid,
+                    unitId        = unitId,
+                    modelName     = modelName,
+                    displayName   = data and data.name or modelName,
+                    cost          = cost,
+                    isHill        = isHill,
+                    placementType = isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (วางพื้น)",
+                })
+            end
+        end
+    end
+
+    table.sort(units, function(a, b) return a.slotNum < b.slotNum end)
+    return units
+end
+
+function macro.GetAvailableSpot(isHill)
+    if isHill then
+        -- 1. ค้นหาจุดวาง HILL: วางบนสิ่งก่อสร้าง / หลังคา / อาคาร (workspace._terrain.hill)
+        local hillFolder = workspace:FindFirstChild("_terrain") and workspace._terrain:FindFirstChild("hill")
+        if hillFolder then
+            for _, p in ipairs(hillFolder:GetChildren()) do
+                if p:IsA("BasePart") then
+                    local spotPos = Vector3.new(p.Position.X, p.Position.Y + (p.Size.Y / 2) + 0.15, p.Position.Z)
+                    if not isPositionOccupied(spotPos, 3.5) then
+                        return CFrame.new(spotPos), p
+                    end
+                end
+            end
+        end
+
+        -- สำรอง: ค้นหาหลังคาอาคารใน _map (rooftops)
+        local map = workspace:FindFirstChild("_map")
+        if map then
+            for _, desc in ipairs(map:GetDescendants()) do
+                if desc:IsA("BasePart") and desc.Name:lower():find("roof") and desc.Size.Y < 3 then
+                    local spotPos = Vector3.new(desc.Position.X, desc.Position.Y + (desc.Size.Y / 2) + 0.15, desc.Position.Z)
+                    if not isPositionOccupied(spotPos, 3.5) then
+                        return CFrame.new(spotPos), desc
+                    end
+                end
+            end
+        end
+    else
+        -- 2. ค้นหาจุดวาง GROUND: วางบนพื้นดินริมถนน (ข้าง workspace._road)
+        local road = workspace:FindFirstChild("_road")
+        if road then
+            local roadParts = road:GetChildren()
+            for i = 1, #roadParts do
+                local rp = roadParts[i]
+                if rp:IsA("BasePart") then
+                    for _, offset in ipairs({-7.5, 7.5, -11, 11}) do
+                        local testPos = (rp.CFrame * CFrame.new(offset, 2, 0)).Position
+                        local params = RaycastParams.new()
+                        params.FilterType = Enum.RaycastFilterType.Include
+                        local filterList = {}
+                        if workspace:FindFirstChild("_terrain") then table.insert(filterList, workspace._terrain) end
+                        if workspace:FindFirstChild("_map") then table.insert(filterList, workspace._map) end
+                        params.FilterDescendantsInstances = filterList
+
+                        local hit = workspace:Raycast(testPos + Vector3.new(0, 6, 0), Vector3.new(0, -20, 0), params)
+                        if hit and hit.Instance and hit.Instance.Parent and hit.Instance.Parent.Name ~= "road" then
+                            local groundPos = hit.Position + Vector3.new(0, 0.05, 0)
+                            if not isPositionOccupied(groundPos, 3.5) then
+                                return CFrame.new(groundPos), hit.Instance
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- สำรอง: ค้นหาใน workspace._terrain.ground
+        local groundFolder = workspace:FindFirstChild("_terrain") and workspace._terrain:FindFirstChild("ground")
+        if groundFolder then
+            for _, gp in ipairs(groundFolder:GetChildren()) do
+                if gp:IsA("BasePart") then
+                    local spotPos = Vector3.new(gp.Position.X, gp.Position.Y + (gp.Size.Y / 2) + 0.1, gp.Position.Z)
+                    if not isPositionOccupied(spotPos, 3.5) then
+                        return CFrame.new(spotPos), gp
+                    end
+                end
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+function macro.RunAIPlacementStep()
+    if isLobby or not spawnRemote then return false end
+
+    local currentActive = getActiveUnitsCount()
+    local maxLimit = macro.aiMaxUnits or 6
+    if currentActive >= maxLimit then
+        macro.aiStatusText = string.format("✅ วางครบโควตาแล้ว (%d/%d ตัว)", currentActive, maxLimit)
+        return false
+    end
+
+    local gold = getGold()
+    local units = macro.GetEquippedUnits()
+    if #units == 0 then
+        macro.aiStatusText = "⚠️ ยังตรวจไม่พบยูนิตในช่องวาง"
+        return false
+    end
+
+    -- หายูนิตที่เงินพอ
+    local affordableUnit = nil
+    for _, u in ipairs(units) do
+        if gold >= u.cost and u.uuid then
+            affordableUnit = u
+            break
+        end
+    end
+
+    if not affordableUnit then
+        local minCost = 999999
+        for _, u in ipairs(units) do
+            if u.cost > 0 and u.cost < minCost then minCost = u.cost end
+        end
+        macro.aiStatusText = string.format("⏳ รอเงิน... (มี %d ¥ │ ขั้นต่ำ %d ¥)", gold, minCost ~= 999999 and minCost or 0)
+        return false
+    end
+
+    -- ค้นหาพิกัดตามประเภท Ground หรือ Hill
+    local spotCF, spotPart = macro.GetAvailableSpot(affordableUnit.isHill)
+    if not spotCF then
+        macro.aiStatusText = string.format("⚠️ ไม่พบจุดว่างสำหรับประเภท %s", affordableUnit.isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (พื้น)")
+        return false
+    end
+
+    macro.aiStatusText = string.format("🚀 วาง %s [%s] บน %s", affordableUnit.displayName, affordableUnit.isHill and "HILL" or "GROUND", spotPart and spotPart.Name or "Spot")
+
+    local ok, res = pcall(function()
+        return spawnRemote:InvokeServer(affordableUnit.uuid, spotCF)
+    end)
+
+    task.wait(0.3)
+    local newActive = getActiveUnitsCount()
+    if newActive > currentActive then
+        Fluent:Notify({
+            Title    = "🤖 AI Placed Unit",
+            Content  = string.format("วาง %s (%s)\nประเภท: %s │ ค่าตัว: %d ¥",
+                affordableUnit.displayName,
+                affordableUnit.isHill and "บนสิ่งก่อสร้าง 🏢" or "บนพื้น 🌿",
+                affordableUnit.placementType,
+                affordableUnit.cost),
+            Duration = 3,
+        })
+        return true
+    end
+
+    return false
+end
+
+Tabs.Event:AddSection("🤖 AI AUTOPLAY (โหมดสุ่มตัวละคร / MAP)")
+
+local AIStatusCard = Tabs.Event:AddParagraph({
+    Title   = "🤖 AI AUTOPLAY LIVE STATUS",
+    Content = "กำลังเริ่มต้นระบบ...",
+})
+
+local function updateAIStatus()
+    if not AIStatusCard then return end
+    local gold = getGold()
+    local active = getActiveUnitsCount()
+    local maxLimit = macro.aiMaxUnits or 6
+    local units = macro.GetEquippedUnits()
+    local unitListStr = {}
+    for _, u in ipairs(units) do
+        table.insert(unitListStr, string.format("• [ช่อง %s] %s: %s (%d ¥)", u.slot, u.displayName, u.isHill and "HILL 🏢" or "GROUND 🌿", u.cost))
+    end
+    local unitSummary = #unitListStr > 0 and table.concat(unitListStr, "\n") or "ไม่มีข้อมูลยูนิตในมือ"
+
+    AIStatusCard:SetDesc(string.format("• สถานะ AI    : %s\n• จำนวนที่วาง  : %d / %d ตัว\n• เงินปัจจุบัน : 💰 %d ¥\n• ยูนิตในมือ :\n%s",
+        macro.aiStatusText or "Standby",
+        active, maxLimit, gold, unitSummary
+    ))
+end
+
+local AIAutoplayToggle = Tabs.Event:AddToggle("AIAutoplayToggle", {
+    Title       = "เปิดใช้งาน AI Autoplay (วางตัวละครอัตโนมัติ)",
+    Description = "ตรวจจับยูนิตในมือ -> แยกแยะ Ground vs Hill -> ถ้าเป็น Hill วางบนอาคาร/สิ่งก่อสร้าง -> Ground วางข้างถนน",
+    Default     = macro.aiAutoplay,
+})
+
+AIAutoplayToggle:OnChanged(function()
+    macro.aiAutoplay = Fluent.Options.AIAutoplayToggle.Value
+    macro.SaveSettings()
+    if macro.aiAutoplay then
+        macro.aiStatusText = "🟢 เริ่มทำงาน AI Autoplay"
+    else
+        macro.aiStatusText = "⏹️ ปิดการทำงาน AI Autoplay"
+    end
+    updateAIStatus()
+    Fluent:Notify({
+        Title   = "AI Autoplay",
+        Content = macro.aiAutoplay and "🟢 เปิดใช้งาน AI Autoplay แล้ว!" or "🔴 ปิดใช้งาน AI Autoplay",
+        Duration = 3,
+    })
+end)
+
+Tabs.Event:AddSlider("AIMaxUnitsSlider", {
+    Title       = "จำกัดจำนวนยูนิตสูงสุดที่วาง (Max Units)",
+    Description = "ป้องกัน AI วางตัวละครเกินโควตาที่กำหนด",
+    Default     = macro.aiMaxUnits or 6,
+    Min         = 1,
+    Max         = 10,
+    Rounding    = 1,
+    Callback    = function(val)
+        macro.aiMaxUnits = val
+        macro.SaveSettings()
+        updateAIStatus()
+    end,
+})
+
+Tabs.Event:AddButton({
+    Title       = "⚡ สแกนยูนิตในมือ (Scan Hand Units)",
+    Description = "ตรวจสอบยูนิตที่เกมสุ่มมาให้ พร้อมระบุประเภท Ground หรือ Hill และราคา",
+    Callback    = function()
+        local units = macro.GetEquippedUnits()
+        if #units == 0 then
+            Fluent:Notify({ Title = "Scan Units", Content = "⚠️ ไม่พบยูนิตในช่องวางตัวละคร", Duration = 3 })
+            return
+        end
+        local list = {}
+        for _, u in ipairs(units) do
+            table.insert(list, string.format("ช่อง %s: %s\n  ➔ ประเภท: %s\n  ➔ ค่าตัว: %d ¥", u.slot, u.displayName, u.placementType, u.cost))
+        end
+        Window:Dialog({
+            Title   = "📋 ผลการสแกนยูนิตในมือ",
+            Content = table.concat(list, "\n\n"),
+            Buttons = {
+                { Title = "ยอดเยี่ยม", Callback = function() end }
+            }
+        })
+    end,
+})
+
+Tabs.Event:AddButton({
+    Title       = "🎯 วางตัวละคร AI ทันที (Force Place 1 Unit)",
+    Description = "สั่งให้ AI ตรวจสอบเงินและวางตัวละครที่เงินพอลงจุดที่ถูกต้องทันที 1 ตัว",
+    Callback    = function()
+        task.spawn(function()
+            local success = macro.RunAIPlacementStep()
+            updateAIStatus()
+            if not success then
+                Fluent:Notify({
+                    Title    = "AI Place Result",
+                    Content  = macro.aiStatusText or "วางไม่สำเร็จ",
+                    Duration = 3,
+                })
+            end
+        end)
+    end,
+})
+
+-- AI Background Worker Loop
+task.spawn(function()
+    while true do
+        if macro.aiAutoplay and not isLobby then
+            pcall(function()
+                macro.RunAIPlacementStep()
+                updateAIStatus()
+            end)
+            task.wait(macro.aiInterval or 1.5)
         else
             task.wait(1.0)
         end
@@ -3179,9 +3531,8 @@ task.spawn(function()
                 end
             end)
 
-            -- เช็ค Auto Start เมื่อเริ่มด่านใหม่
-            if macro.autoStartOnMatch then
-                -- 1) ตรวจจับ VoteStart แล้วกด Yes ทันที
+            -- เช็ค Auto Vote Start เมื่อตรวจพบ VoteStart
+            if macro.autoVoteStart then
                 local vs = plr.PlayerGui:FindFirstChild("VoteStart")
                 if vs and vs.Enabled then
                     if not macro._hasVotedStart then
@@ -3189,7 +3540,7 @@ task.spawn(function()
                         task.spawn(function()
                             macro.VoteGameStart()
                             Fluent:Notify({
-                                Title    = "Auto Start",
+                                Title    = "Auto Vote Start",
                                 Content  = "⚡ กดโหวตเริ่มเกม (VoteStart Yes) ให้อัตโนมัติแล้ว!",
                                 Duration = 3,
                             })
@@ -3198,20 +3549,20 @@ task.spawn(function()
                 else
                     macro._hasVotedStart = false
                 end
+            end
 
-                -- 2) เล่น Macro อัตโนมัติเมื่อ Wave >= 1
-                if not macro.playing and not macro.recording and #macro.macro > 0 then
-                    if curWave >= 1 and not macro._hasAutoStarted then
-                        macro._hasAutoStarted = true
-                        task.delay(1, function()
-                            macro.Play()
-                            Fluent:Notify({
-                                Title   = "Auto Start",
-                                Content = "เริ่มเล่น Macro อัตโนมัติในด่านใหม่แล้ว!",
-                                Duration = 3,
-                            })
-                        end)
-                    end
+            -- เช็ค Auto Play Macro เมื่อ Wave >= 1 (แยกออกมาต่างหาก ไม่รวมกับ Auto Start)
+            if macro.autoPlayMacroOnMatch and not macro.playing and not macro.recording and #macro.macro > 0 then
+                if curWave >= 1 and not macro._hasAutoStarted then
+                    macro._hasAutoStarted = true
+                    task.delay(1, function()
+                        macro.Play()
+                        Fluent:Notify({
+                            Title   = "Auto Play Macro",
+                            Content = "เริ่มเล่น Macro อัตโนมัติในด่านใหม่แล้ว!",
+                            Duration = 3,
+                        })
+                    end)
                 end
             end
         end)
@@ -3224,12 +3575,12 @@ task.spawn(function()
     local function hookVoteStart(vs)
         if not vs or not vs:IsA("ScreenGui") then return end
         vs:GetPropertyChangedSignal("Enabled"):Connect(function()
-            if vs.Enabled and macro.autoStartOnMatch and not macro._hasVotedStart then
+            if vs.Enabled and macro.autoVoteStart and not macro._hasVotedStart then
                 macro._hasVotedStart = true
                 task.delay(0.1, function()
                     macro.VoteGameStart()
                     Fluent:Notify({
-                        Title    = "Auto Start",
+                        Title    = "Auto Vote Start",
                         Content  = "⚡ โหวตเริ่มเกม (VoteStart Yes) ทันที!",
                         Duration = 3,
                     })
@@ -3246,12 +3597,12 @@ task.spawn(function()
     plr.PlayerGui.ChildAdded:Connect(function(child)
         if child.Name == "VoteStart" then
             hookVoteStart(child)
-            if child:IsA("ScreenGui") and child.Enabled and macro.autoStartOnMatch and not macro._hasVotedStart then
+            if child:IsA("ScreenGui") and child.Enabled and macro.autoVoteStart and not macro._hasVotedStart then
                 macro._hasVotedStart = true
                 task.delay(0.1, function()
                     macro.VoteGameStart()
                     Fluent:Notify({
-                        Title    = "Auto Start",
+                        Title    = "Auto Vote Start",
                         Content  = "⚡ โหวตเริ่มเกม (VoteStart Yes) ทันที!",
                         Duration = 3,
                     })
