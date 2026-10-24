@@ -2857,7 +2857,7 @@ function macro.RunAIPlacementStep()
     if isLobby or not spawnRemote then return false end
 
     local currentActive = getActiveUnitsCount()
-    local maxLimit = macro.aiMaxUnits or 6
+    local maxLimit = tonumber(macro.aiMaxUnits) or 6
     if currentActive >= maxLimit then
         macro.aiStatusText = string.format("✅ วางครบโควตาแล้ว (%d/%d ตัว)", currentActive, maxLimit)
         return false
@@ -2873,7 +2873,8 @@ function macro.RunAIPlacementStep()
     -- หายูนิตที่เงินพอ
     local affordableUnit = nil
     for _, u in ipairs(units) do
-        if gold >= u.cost and u.uuid then
+        local uCost = tonumber(u.cost) or 0
+        if gold >= uCost and u.uuid then
             affordableUnit = u
             break
         end
@@ -2882,7 +2883,8 @@ function macro.RunAIPlacementStep()
     if not affordableUnit then
         local minCost = 999999
         for _, u in ipairs(units) do
-            if u.cost > 0 and u.cost < minCost then minCost = u.cost end
+            local uc = tonumber(u.cost) or 0
+            if uc > 0 and uc < minCost then minCost = uc end
         end
         macro.aiStatusText = string.format("⏳ รอเงิน... (มี %d ¥ │ ขั้นต่ำ %d ¥)", gold, minCost ~= 999999 and minCost or 0)
         return false
@@ -2930,7 +2932,7 @@ local function updateAIStatus()
     if not AIStatusCard then return end
     local gold = getGold()
     local active = getActiveUnitsCount()
-    local maxLimit = macro.aiMaxUnits or 6
+    local maxLimit = tonumber(macro.aiMaxUnits) or 6
     local units = macro.GetEquippedUnits()
     local unitListStr = {}
     for _, u in ipairs(units) do
@@ -2969,12 +2971,12 @@ end)
 Tabs.Event:AddSlider("AIMaxUnitsSlider", {
     Title       = "จำกัดจำนวนยูนิตสูงสุดที่วาง (Max Units)",
     Description = "ป้องกัน AI วางตัวละครเกินโควตาที่กำหนด",
-    Default     = macro.aiMaxUnits or 6,
+    Default     = tonumber(macro.aiMaxUnits) or 6,
     Min         = 1,
     Max         = 10,
     Rounding    = 1,
     Callback    = function(val)
-        macro.aiMaxUnits = val
+        macro.aiMaxUnits = tonumber(val) or 6
         macro.SaveSettings()
         updateAIStatus()
     end,
