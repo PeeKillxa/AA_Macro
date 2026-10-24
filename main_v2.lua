@@ -445,8 +445,9 @@ _G.AAMacro = {
     eventLastCaptcha       = "-",
     eventStatusText        = "⏹️ STANDBY — รอคำสั่ง",
     aiAutoplay             = false,
-    aiMaxUnits             = 6,
-    aiInterval             = 1.5,
+    aiAutoUpgrade          = true,
+    aiMaxUnits             = 20,
+    aiInterval             = 1.0,
     aiStatusText           = "AI Standby",
 }
 local macro = _G.AAMacro
@@ -1148,7 +1149,8 @@ function macro.SaveSettings()
             autoVoteStart          = macro.autoVoteStart,
             autoPlayMacroOnMatch   = macro.autoPlayMacroOnMatch,
             aiAutoplay             = macro.aiAutoplay,
-            aiMaxUnits             = macro.aiMaxUnits or 6,
+            aiAutoUpgrade          = macro.aiAutoUpgrade,
+            aiMaxUnits             = macro.aiMaxUnits or 20,
             autoReplay             = macro.autoReplay,
             playMode               = macro.playMode,
             actionDelay            = macro.actionDelay,
@@ -1173,7 +1175,8 @@ function macro.LoadSettings()
                 if data.autoVoteStart ~= nil then macro.autoVoteStart = data.autoVoteStart end
                 if data.autoPlayMacroOnMatch ~= nil then macro.autoPlayMacroOnMatch = data.autoPlayMacroOnMatch end
                 if data.aiAutoplay ~= nil then macro.aiAutoplay = data.aiAutoplay end
-                if data.aiMaxUnits ~= nil then macro.aiMaxUnits = tonumber(data.aiMaxUnits) or 6 end
+                if data.aiAutoUpgrade ~= nil then macro.aiAutoUpgrade = data.aiAutoUpgrade end
+                if data.aiMaxUnits ~= nil then macro.aiMaxUnits = tonumber(data.aiMaxUnits) or 20 end
                 if data.autoStartOnMatch ~= nil then macro.autoStartOnMatch = data.autoStartOnMatch end
                 if data.autoReplay ~= nil then macro.autoReplay = data.autoReplay end
                 if data.playMode ~= nil then macro.playMode = data.playMode end
@@ -2946,7 +2949,7 @@ function macro.RunAIPlacementStep()
     if isLobby or not spawnRemote then return false end
 
     local currentActive = getActiveUnitsCount()
-    local maxLimit = tonumber(macro.aiMaxUnits) or 6
+    local maxLimit = tonumber(macro.aiMaxUnits) or 20
     if currentActive >= maxLimit then
         macro.aiStatusText = string.format("✅ วางครบโควตาแล้ว (%d/%d ตัว)", currentActive, maxLimit)
         return false
@@ -3026,6 +3029,91 @@ function macro.RunAIPlacementStep()
     end
 end
 
+function macro.RunAIUpgradeStep()
+    if isLobby or not upgradeRemote or not macro.aiAutoUpgrade then return false end
+
+    local gold = getGold()
+    if gold <= 0 then return false end
+
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return false end
+
+    local allUnitsData = getUnitsData()
+    local upgradableUnits = {}
+
+    for _, u in ipairs(unitsFolder:GetChildren()) do
+        local stats = u:FindFirstChild("_stats")
+        if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+            local upgObj = stats:FindFirstChild("upgrade")
+            local maxUpgObj = stats:FindFirstChild("max_upgrade")
+            local curLvl = upgObj and upgObj.Value or 0
+            local maxLvl = maxUpgObj and maxUpgObj.Value or 0
+            local uId = stats:FindFirstChild("id") and stats.id.Value or u.Name
+
+            if curLvl < maxLvl then
+                local nextCost = getUnitUpgradeCostFromData(uId, curLvl + 1) or 0
+                local displayName = (allUnitsData and (allUnitsData[uId] or allUnitsData[u.Name]) and (allUnitsData[uId] or allUnitsData[u.Name]).name) or u.Name
+                table.insert(upgradableUnits, {
+                    model       = u,
+                    name        = u.Name,
+                    unitId      = uId,
+                    displayName = displayName,
+                    level       = curLvl,
+                    maxLevel    = maxLvl,
+                    nextCost    = nextCost,
+                })
+            end
+        end
+    end
+
+    if #upgradableUnits == 0 then return false end
+
+    -- คัดกรองตัวที่เงินพอ
+    local affordableList = {}
+    for _, item in ipairs(upgradableUnits) do
+        if item.nextCost > 0 and gold >= item.nextCost then
+            table.insert(affordableList, item)
+        elseif item.nextCost == 0 and gold >= 300 then
+            table.insert(affordableList, item)
+        end
+    end
+
+    if #affordableList == 0 then return false end
+
+    -- เรียงลำดับตัวที่เลเวลต่ำสุด หรือราคาถูกสุดก่อน เพื่อกระจายดาเมจให้ทั่วถึง
+    table.sort(affordableList, function(a, b)
+        if a.level == b.level then
+            return a.nextCost < b.nextCost
+        end
+        return a.level < b.level
+    end)
+
+    local target = affordableList[1]
+    local beforeLvl = target.level
+
+    local okInvoke, resInvoke = pcall(function()
+        return upgradeRemote:InvokeServer(target.model)
+    end)
+
+    task.wait(0.2)
+    local stats = target.model:FindFirstChild("_stats")
+    local curLvl = stats and stats:FindFirstChild("upgrade") and stats.upgrade.Value or beforeLvl
+    if curLvl > beforeLvl then
+        Fluent:Notify({
+            Title    = "⚡ AI Auto Upgraded",
+            Content  = string.format("อัปเกรด %s ขึ้น Lv.%d/%d\nค่าอัปเกรด: %d ¥",
+                target.displayName,
+                curLvl, target.maxLevel,
+                target.nextCost),
+            Duration = 2.5,
+        })
+        macro.aiStatusText = string.format("⚡ อัปเกรด %s [Lv.%d ➔ %d/%d]", target.displayName, beforeLvl, curLvl, target.maxLevel)
+        return true
+    end
+
+    return false
+end
+
 Tabs.Event:AddSection("🤖 AI AUTOPLAY (โหมดสุ่มตัวละคร / MAP)")
 
 local AIStatusCard = Tabs.Event:AddParagraph({
@@ -3037,7 +3125,7 @@ local function updateAIStatus()
     if not AIStatusCard then return end
     local gold = getGold()
     local active = getActiveUnitsCount()
-    local maxLimit = tonumber(macro.aiMaxUnits) or 6
+    local maxLimit = tonumber(macro.aiMaxUnits) or 20
     local units = macro.GetEquippedUnits()
     local unitListStr = {}
     for _, u in ipairs(units) do
@@ -3045,15 +3133,33 @@ local function updateAIStatus()
     end
     local unitSummary = #unitListStr > 0 and table.concat(unitListStr, "\n") or "ไม่มีข้อมูลยูนิตในมือ"
 
-    AIStatusCard:SetDesc(string.format("• สถานะ AI    : %s\n• จำนวนที่วาง  : %d / %d ตัว\n• เงินปัจจุบัน : 💰 %d ¥\n• ยูนิตในมือ :\n%s",
+    local upgradableCount = 0
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if unitsFolder then
+        for _, u in ipairs(unitsFolder:GetChildren()) do
+            local stats = u:FindFirstChild("_stats")
+            if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+                local upgObj = stats:FindFirstChild("upgrade")
+                local maxUpgObj = stats:FindFirstChild("max_upgrade")
+                if upgObj and maxUpgObj and upgObj.Value < maxUpgObj.Value then
+                    upgradableCount = upgradableCount + 1
+                end
+            end
+        end
+    end
+
+    AIStatusCard:SetDesc(string.format("• สถานะ AI      : %s\n• จำนวนที่วาง    : %d / %d ตัว (Max 20)\n• รออัปเกรด      : ⚡ %d ตัว\n• Auto Upgrade   : %s\n• เงินปัจจุบัน   : 💰 %d ¥\n• ยูนิตในมือ :\n%s",
         macro.aiStatusText or "Standby",
-        active, maxLimit, gold, unitSummary
+        active, maxLimit,
+        upgradableCount,
+        macro.aiAutoUpgrade and "🟢 ON" or "🔴 OFF",
+        gold, unitSummary
     ))
 end
 
 local AIAutoplayToggle = Tabs.Event:AddToggle("AIAutoplayToggle", {
     Title       = "เปิดใช้งาน AI Autoplay (วางตัวละครอัตโนมัติ)",
-    Description = "ตรวจจับยูนิตในมือ -> แยกแยะ Ground vs Hill -> ถ้าเป็น Hill วางบนอาคาร/สิ่งก่อสร้าง -> Ground วางข้างถนน",
+    Description = "ตรวจจับยูนิตในมือ -> แยกแยะ Ground vs Hill -> เล็งวางบริเวณที่มีมอนสเตอร์อัตโนมัติ",
     Default     = macro.aiAutoplay,
 })
 
@@ -3073,15 +3179,32 @@ AIAutoplayToggle:OnChanged(function()
     })
 end)
 
+local AIAutoUpgradeToggle = Tabs.Event:AddToggle("AIAutoUpgradeToggle", {
+    Title       = "เปิดใช้งาน AI Auto Upgrade (อัปเกรดยูนิตทุกตัว)",
+    Description = "ตรวจจับยูนิตทั้งหมดที่วางในสนาม -> ทำการอัปเกรดยูนิตทุกตัวให้อัตโนมัติทันทีที่เงินพอจนเต็ม Max Level",
+    Default     = macro.aiAutoUpgrade ~= false,
+})
+
+AIAutoUpgradeToggle:OnChanged(function()
+    macro.aiAutoUpgrade = Fluent.Options.AIAutoUpgradeToggle.Value
+    macro.SaveSettings()
+    updateAIStatus()
+    Fluent:Notify({
+        Title   = "AI Auto Upgrade",
+        Content = macro.aiAutoUpgrade and "🟢 เปิดใช้งาน Auto Upgrade แล้ว!" or "🔴 ปิดใช้งาน Auto Upgrade",
+        Duration = 3,
+    })
+end)
+
 Tabs.Event:AddSlider("AIMaxUnitsSlider", {
     Title       = "จำกัดจำนวนยูนิตสูงสุดที่วาง (Max Units)",
-    Description = "ป้องกัน AI วางตัวละครเกินโควตาที่กำหนด",
-    Default     = tonumber(macro.aiMaxUnits) or 6,
+    Description = "รองรับการวางสูงสุดถึง 20 ตัวละครตามที่กำหนด",
+    Default     = tonumber(macro.aiMaxUnits) or 20,
     Min         = 1,
-    Max         = 10,
+    Max         = 20,
     Rounding    = 1,
     Callback    = function(val)
-        macro.aiMaxUnits = tonumber(val) or 6
+        macro.aiMaxUnits = tonumber(val) or 20
         macro.SaveSettings()
         updateAIStatus()
     end,
@@ -3128,15 +3251,38 @@ Tabs.Event:AddButton({
     end,
 })
 
+Tabs.Event:AddButton({
+    Title       = "⚡ อัปเกรดยูนิต AI ทันที (Force Upgrade 1 Unit)",
+    Description = "สั่งให้ AI ตรวจสอบเงินและอัปเกรดยูนิตในสนามที่ยังไม่ตันทันที 1 ขั้น",
+    Callback    = function()
+        task.spawn(function()
+            local success = macro.RunAIUpgradeStep()
+            updateAIStatus()
+            if not success then
+                Fluent:Notify({
+                    Title    = "AI Upgrade Result",
+                    Content  = macro.aiStatusText or "เงินไม่พอหรือยูนิตทุกตัวตันแล้ว",
+                    Duration = 3,
+                })
+            end
+        end)
+    end,
+})
+
 -- AI Background Worker Loop
 task.spawn(function()
     while true do
-        if macro.aiAutoplay and not isLobby then
+        if not isLobby and (macro.aiAutoplay or macro.aiAutoUpgrade) then
             pcall(function()
-                macro.RunAIPlacementStep()
+                if macro.aiAutoplay then
+                    macro.RunAIPlacementStep()
+                end
+                if macro.aiAutoUpgrade then
+                    macro.RunAIUpgradeStep()
+                end
                 updateAIStatus()
             end)
-            task.wait(macro.aiInterval or 1.5)
+            task.wait(macro.aiInterval or 1.0)
         else
             task.wait(1.0)
         end
