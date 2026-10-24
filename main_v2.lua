@@ -2832,6 +2832,23 @@ local function getMobProximityScore(spotPos, mobPositions)
     return minDist
 end
 
+local function getNearestRoadPart(pos)
+    local road = workspace:FindFirstChild("_road")
+    if not road then return nil end
+    local nearestPart = nil
+    local minDist = 999999
+    for _, rp in ipairs(road:GetChildren()) do
+        if rp:IsA("BasePart") then
+            local d = (Vector2.new(rp.Position.X, rp.Position.Z) - Vector2.new(pos.X, pos.Z)).Magnitude
+            if d < minDist then
+                minDist = d
+                nearestPart = rp
+            end
+        end
+    end
+    return nearestPart
+end
+
 function macro.GetEquippedUnits()
     local units = {}
     if not unitsFrame then return units end
@@ -2857,6 +2874,11 @@ function macro.GetEquippedUnits()
                     -- ตรวจสอบคุณสมบัติ hill_unit (ถ้าเป็น true คือตัววางบนอาคาร/สิ่งก่อสร้าง/Hill)
                     local isHill = (data and data.hill_unit == true) or false
 
+                    -- ตรวจสอบยูนิตฟาร์มเงิน (Speedwagon / Bulma / farm_amount > 0)
+                    local farmAmount = (data and tonumber(data.farm_amount)) or 0
+                    local nameLower = (data and data.name or modelName):lower()
+                    local isFarm = (farmAmount > 0) or nameLower:find("speedwagon") or nameLower:find("bulma") or nameLower:find("farm")
+
                     table.insert(units, {
                         slot          = ch.Name,
                         slotNum       = tonumber(ch.Name) or 99,
@@ -2866,7 +2888,8 @@ function macro.GetEquippedUnits()
                         displayName   = data and data.name or modelName,
                         cost          = cost,
                         isHill        = isHill,
-                        placementType = isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (วางพื้น)",
+                        isFarm        = isFarm,
+                        placementType = isHill and "HILL (บนสิ่งก่อสร้าง)" or (isFarm and "FARM (ตัวฟาร์มเงิน)" or "GROUND (วางพื้น)"),
                     })
                 end
             end
@@ -2877,12 +2900,12 @@ function macro.GetEquippedUnits()
     return units
 end
 
-function macro.GetAvailableSpot(isHill)
+function macro.GetAvailableSpot(isHill, isFarm)
     local mobPositions = getActiveMobPositions()
     local candidates = {}
 
     if isHill then
-        -- 1. ค้นหาจุดวาง HILL: วางบนสิ่งก่อสร้าง / หลังคา / อาคาร (workspace._terrain.hill) เท่านั้น!
+        -- 1. ค้นหาจุดวาง HILL: วางบนสิ่งก่อสร้าง / หลังคา / อาคาร (workspace._terrain.hill)
         local hillFolder = workspace:FindFirstChild("_terrain") and workspace._terrain:FindFirstChild("hill")
         if hillFolder then
             for _, p in ipairs(hillFolder:GetChildren()) do
@@ -2891,36 +2914,37 @@ function macro.GetAvailableSpot(isHill)
                     params.FilterType = Enum.RaycastFilterType.Include
                     params.FilterDescendantsInstances = { p }
 
-                    local testOffsets = { {0, 0} }
-                    if p.Size.X >= 7 or p.Size.Z >= 7 then
-                        local sx = math.clamp(p.Size.X * 0.28, 2.5, 6)
-                        local sz = math.clamp(p.Size.Z * 0.28, 2.5, 6)
-                        table.insert(testOffsets, { sx, sz })
-                        table.insert(testOffsets, { -sx, -sz })
-                        table.insert(testOffsets, { sx, -sz })
-                        table.insert(testOffsets, { -sx, sz })
-                    end
+                    local step = 3.6
+                    local halfX = math.max(0, (p.Size.X / 2) - 1.8)
+                    local halfZ = math.max(0, (p.Size.Z / 2) - 1.8)
+                    local nearestRoad = getNearestRoadPart(p.Position)
 
-                    for _, off in ipairs(testOffsets) do
-                        local rayPos = (p.CFrame * CFrame.new(off[1], 5, off[2])).Position
-                        local hit = workspace:Raycast(rayPos, Vector3.new(0, -10, 0), params)
-                        local spotPos = hit and (hit.Position + Vector3.new(0, 0.05, 0)) or (p.CFrame * CFrame.new(off[1], (p.Size.Y / 2) + 0.1, off[2])).Position
-
-                        if not isPositionOccupied(spotPos, 3.8) and not isSpotBlacklisted(spotPos) then
-                            local score = getMobProximityScore(spotPos, mobPositions)
-                            table.insert(candidates, {
-                                cf = CFrame.new(spotPos),
-                                part = p,
-                                score = score,
-                                pos = spotPos
-                            })
+                    for ox = -halfX, halfX, step do
+                        for oz = -halfZ, halfZ, step do
+                            local rayPos = (p.CFrame * CFrame.new(ox, 8, oz)).Position
+                            local hit = workspace:Raycast(rayPos, Vector3.new(0, -18, 0), params)
+                            if hit and hit.Instance and hit.Normal.Y > 0.72 then
+                                local spotPos = hit.Position + Vector3.new(0, 0.05, 0)
+                                if not isPositionOccupied(spotPos, 3.6) and not isSpotBlacklisted(spotPos) then
+                                    local score = getMobProximityScore(spotPos, mobPositions)
+                                    local lookTarget = nearestRoad and Vector3.new(nearestRoad.Position.X, spotPos.Y, nearestRoad.Position.Z) or (spotPos + p.CFrame.LookVector)
+                                    local facingCF = ((lookTarget - spotPos).Magnitude > 0.5) and CFrame.lookAt(spotPos, lookTarget) or CFrame.new(spotPos)
+                                    table.insert(candidates, {
+                                        cf = facingCF,
+                                        part = p,
+                                        score = score,
+                                        pos = spotPos,
+                                        isHill = true,
+                                    })
+                                end
+                            end
                         end
                     end
                 end
             end
         end
     else
-        -- 2. ค้นหาจุดวาง GROUND: วางบนพื้นดิน (workspace._terrain.ground) เท่านั้น!
+        -- 2. ค้นหาจุดวาง GROUND: วางบนพื้นดิน (workspace._terrain.ground)
         local groundFolder = workspace:FindFirstChild("_terrain") and workspace._terrain:FindFirstChild("ground")
         local road = workspace:FindFirstChild("_road")
 
@@ -2930,22 +2954,54 @@ function macro.GetAvailableSpot(isHill)
             params.FilterDescendantsInstances = { groundFolder }
 
             local roadParts = road:GetChildren()
+
+            -- แยก Rings ตามบทบาทของยูนิต (Farm vs Combat DPS)
+            -- ตัวเงินวางวงกว้าง (18-30 studs) ด้านหลัง/ขอบแมพ เพื่อเปิดทางให้ตัว DPS ยืนชิดขอบถนน
+            local distRings = isFarm and { 18.0, 22.0, 26.0, 30.0 } or { 5.2, 7.8, 10.4, 13.0, 15.8 }
+            local longitudinalOffsets = isFarm and { -5.0, 0, 5.0 } or { -3.5, 0, 3.5 }
+
             for i = 1, #roadParts do
                 local rp = roadParts[i]
                 if rp:IsA("BasePart") then
-                    for _, offset in ipairs({-6.5, 6.5, -9.5, 9.5, -13, 13, -16, 16}) do
-                        local testPos = (rp.CFrame * CFrame.new(offset, 6, 0)).Position
-                        local hit = workspace:Raycast(testPos, Vector3.new(0, -25, 0), params)
-                        if hit and hit.Instance then
-                            local groundPos = hit.Position + Vector3.new(0, 0.05, 0)
-                            if not isPositionOccupied(groundPos, 3.8) and not isSpotBlacklisted(groundPos) then
-                                local score = getMobProximityScore(groundPos, mobPositions)
-                                table.insert(candidates, {
-                                    cf = CFrame.new(groundPos),
-                                    part = hit.Instance,
-                                    score = score,
-                                    pos = groundPos
-                                })
+                    for _, side in ipairs({ -1, 1 }) do
+                        for _, dist in ipairs(distRings) do
+                            for _, longOff in ipairs(longitudinalOffsets) do
+                                local sampleCF = rp.CFrame * CFrame.new(side * dist, 8, longOff)
+                                local rayStart = sampleCF.Position
+                                local hit = workspace:Raycast(rayStart, Vector3.new(0, -28, 0), params)
+
+                                if hit and hit.Instance and hit.Normal.Y > 0.72 then
+                                    local groundPos = hit.Position + Vector3.new(0, 0.05, 0)
+                                    if not isPositionOccupied(groundPos, 3.6) and not isSpotBlacklisted(groundPos) then
+                                        local mobDist = getMobProximityScore(groundPos, mobPositions)
+                                        local score
+                                        if isFarm then
+                                            -- ตัวฟาร์ม: ชอบที่ห่างฝูงมอนสเตอร์ ไม่แย่งพื้นที่ตัวต่อสู้
+                                            score = -mobDist + (dist * 0.8)
+                                        else
+                                            -- ตัวต่อสู้: ชอบที่ใกล้เส้นทางมอนสเตอร์และใกล้ขอบถนน
+                                            score = mobDist + (dist * 1.5)
+                                        end
+
+                                        -- หันหน้ายูนิตเข้าหากลางถนน (LookAt Road Node)
+                                        local lookTarget = Vector3.new(rp.Position.X, groundPos.Y, rp.Position.Z)
+                                        local facingCF
+                                        if (lookTarget - groundPos).Magnitude > 0.5 then
+                                            facingCF = CFrame.lookAt(groundPos, lookTarget)
+                                        else
+                                            facingCF = CFrame.new(groundPos)
+                                        end
+
+                                        table.insert(candidates, {
+                                            cf = facingCF,
+                                            part = hit.Instance,
+                                            score = score,
+                                            pos = groundPos,
+                                            isHill = false,
+                                            dist = dist,
+                                        })
+                                    end
+                                end
                             end
                         end
                     end
@@ -2955,17 +3011,34 @@ function macro.GetAvailableSpot(isHill)
 
         -- สำรอง: ค้นหาใน workspace._terrain.ground โดยตรงถ้าตามแนวถนนไม่มี
         if #candidates == 0 and groundFolder then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Include
+            params.FilterDescendantsInstances = { groundFolder }
+
             for _, gp in ipairs(groundFolder:GetChildren()) do
                 if gp:IsA("BasePart") then
-                    local spotPos = Vector3.new(gp.Position.X, gp.Position.Y + (gp.Size.Y / 2) + 0.1, gp.Position.Z)
-                    if not isPositionOccupied(spotPos, 3.8) and not isSpotBlacklisted(spotPos) then
-                        local score = getMobProximityScore(spotPos, mobPositions)
-                        table.insert(candidates, {
-                            cf = CFrame.new(spotPos),
-                            part = gp,
-                            score = score,
-                            pos = spotPos
-                        })
+                    local sx = math.clamp(gp.Size.X * 0.3, 3, 15)
+                    local sz = math.clamp(gp.Size.Z * 0.3, 3, 15)
+                    local nearestRoad = getNearestRoadPart(gp.Position)
+
+                    for _, off in ipairs({{0,0}, {sx, 0}, {-sx, 0}, {0, sz}, {0, -sz}, {sx, sz}, {-sx, -sz}}) do
+                        local rayPos = (gp.CFrame * CFrame.new(off[1], 8, off[2])).Position
+                        local hit = workspace:Raycast(rayPos, Vector3.new(0, -28, 0), params)
+                        if hit and hit.Instance and hit.Normal.Y > 0.72 then
+                            local spotPos = hit.Position + Vector3.new(0, 0.05, 0)
+                            if not isPositionOccupied(spotPos, 3.6) and not isSpotBlacklisted(spotPos) then
+                                local score = getMobProximityScore(spotPos, mobPositions)
+                                local lookTarget = nearestRoad and Vector3.new(nearestRoad.Position.X, spotPos.Y, nearestRoad.Position.Z) or (spotPos + gp.CFrame.LookVector)
+                                local facingCF = ((lookTarget - spotPos).Magnitude > 0.5) and CFrame.lookAt(spotPos, lookTarget) or CFrame.new(spotPos)
+                                table.insert(candidates, {
+                                    cf = facingCF,
+                                    part = gp,
+                                    score = score,
+                                    pos = spotPos,
+                                    isHill = false,
+                                })
+                            end
+                        end
                     end
                 end
             end
@@ -2973,12 +3046,12 @@ function macro.GetAvailableSpot(isHill)
     end
 
     if #candidates > 0 then
-        -- เรียงลำดับจากจุดที่ใกล้ฝูงมอนสเตอร์มากที่สุดก่อน (ระยะห่างน้อยสุด = คะแนนดีสุด)
+        -- เรียงลำดับตามคะแนนความเหมาะสม (คะแนนต่ำสุด = ดีที่สุด)
         table.sort(candidates, function(a, b) return a.score < b.score end)
-        return candidates[1].cf, candidates[1].part, candidates[1].score
+        return candidates[1].cf, candidates[1].part, candidates[1].score, candidates
     end
 
-    return nil, nil, nil
+    return nil, nil, nil, {}
 end
 
 macro.failedUnitPlacements = macro.failedUnitPlacements or {}
@@ -3339,20 +3412,17 @@ function macro.RunAIPlacementStep()
         return false
     end
 
-    -- หายูนิตที่เงินพอ และยังไม่เคยเฟลครบ 3 ครั้ง (ถ้าตัวไหนวางไม่ได้ครบ 3 ครั้ง ให้ข้ามไปตัวต่อไปทันที)
-    local affordableUnit = nil
+    -- คัดกรองยูนิตที่เงินพอ และยังไม่เคยเฟลครบ 3 ครั้ง
+    local eligibleUnits = {}
     for _, u in ipairs(units) do
         local failCount = macro.failedUnitPlacements[u.uuid] or 0
-        if failCount < 3 then
-            local uCost = tonumber(u.cost) or 0
-            if gold >= uCost and u.uuid then
-                affordableUnit = u
-                break
-            end
+        local uCost = tonumber(u.cost) or 0
+        if failCount < 3 and gold >= uCost and u.uuid then
+            table.insert(eligibleUnits, u)
         end
     end
 
-    if not affordableUnit then
+    if #eligibleUnits == 0 then
         -- ตรวจสอบว่ามียูนิตที่ถูกข้ามเพราะเฟลครบ 3 ครั้งหรือไม่
         local allSkipped = true
         for _, u in ipairs(units) do
@@ -3380,78 +3450,133 @@ function macro.RunAIPlacementStep()
         return false
     end
 
-    -- ค้นหาพิกัดตามประเภท Ground หรือ Hill โดยเน้นบริเวณที่มีมอนสเตอร์
-    local spotCF, spotPart, mobDist = macro.GetAvailableSpot(affordableUnit.isHill)
-    if not spotCF then
-        macro.failedUnitPlacements[affordableUnit.uuid] = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
-        local currentFails = macro.failedUnitPlacements[affordableUnit.uuid]
+    -- เรียงลำดับความสำคัญของยูนิต:
+    -- 1. ตัวฟาร์มเงิน (isFarm == true) มาก่อนเสมอถ้าเงินพอ!
+    -- 2. จำนวนครั้งที่เคยเฟลน้อยกว่ามาก่อน (failCount น้อยสุด)
+    -- 3. ราคาถูกกว่ามาก่อน
+    table.sort(eligibleUnits, function(a, b)
+        if a.isFarm ~= b.isFarm then
+            return a.isFarm == true
+        end
+        local fa = macro.failedUnitPlacements[a.uuid] or 0
+        local fb = macro.failedUnitPlacements[b.uuid] or 0
+        if fa ~= fb then
+            return fa < fb
+        end
+        return (tonumber(a.cost) or 0) < (tonumber(b.cost) or 0)
+    end)
+
+    local targetUnit = eligibleUnits[1]
+
+    -- ค้นหาพิกัดตามประเภท Ground หรือ Hill โดยส่ง isFarm เข้าไปแยกโซน
+    local bestCF, bestPart, bestScore, candidates = macro.GetAvailableSpot(targetUnit.isHill, targetUnit.isFarm)
+    if not bestCF or #candidates == 0 then
+        macro.failedUnitPlacements[targetUnit.uuid] = (macro.failedUnitPlacements[targetUnit.uuid] or 0) + 1
+        local currentFails = macro.failedUnitPlacements[targetUnit.uuid]
         if currentFails >= 3 then
-            macro.aiStatusText = string.format("⏭️ ไม่พบจุดวาง %s ครบ 3 ครั้ง ➔ ข้ามไปตัวถัดไป", affordableUnit.displayName)
+            macro.aiStatusText = string.format("⏭️ ไม่พบจุดวาง %s ครบ 3 ครั้ง ➔ ข้ามไปตัวถัดไป", targetUnit.displayName)
             Fluent:Notify({
                 Title    = "⚠️ Skip Unit (3/3 Fails)",
-                Content  = string.format("ไม่พบจุดวาง %s ครบ 3 ครั้ง\nข้ามไปวางตัวละครตัวถัดไปในมือทันที!", affordableUnit.displayName),
+                Content  = string.format("ไม่พบจุดวาง %s ครบ 3 ครั้ง\nข้ามไปวางตัวละครตัวถัดไปในมือทันที!", targetUnit.displayName),
                 Duration = 3,
             })
         else
-            macro.aiStatusText = string.format("⚠️ ไม่พบจุดว่างสำหรับ %s (%d/3 ครั้ง)", affordableUnit.displayName, currentFails)
+            macro.aiStatusText = string.format("⚠️ ไม่พบจุดว่างสำหรับ %s (%d/3 ครั้ง)", targetUnit.displayName, currentFails)
         end
         return false
     end
 
-    local mobInfoStr = (mobDist and mobDist < 900) and string.format(" (ใกล้ศัตรู %.0f studs)", mobDist) or " (ดักหน้าเส้นทาง)"
-    local currentAttempt = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
-    macro.aiStatusText = string.format("🚀 วาง %s [%s]%s บน %s (ครั้งที่ %d/3)", affordableUnit.displayName, affordableUnit.isHill and "HILL" or "GROUND", mobInfoStr, spotPart and spotPart.Name or "Spot", currentAttempt)
+    -- กลยุทธ์ Micro-Spiral Retries แบบ Hub Scripts:
+    -- ลอง Candidate สูงสุด 3 จุดแรก
+    -- แต่ละจุดลองขยับ Micro-Offset เผื่อติดขอบชนเล็กน้อย (0, +1.8X, -1.8X, +1.8Z, -1.8Z)
+    local microOffsets = {
+        Vector3.new(0, 0, 0),
+        Vector3.new(1.8, 0, 0),
+        Vector3.new(-1.8, 0, 0),
+        Vector3.new(0, 0, 1.8),
+        Vector3.new(0, 0, -1.8),
+    }
 
-    local okInvoke, resInvoke = pcall(function()
-        return spawnRemote:InvokeServer(affordableUnit.uuid, spotCF)
-    end)
+    local maxCandidatesToTry = math.min(3, #candidates)
+    local placedSuccessfully = false
+    local placedCF = nil
+    local placedPart = nil
 
-    -- ตรวจสอบการเกิดจริงของยูนิตภายใน 1.2 วินาที
-    local confirmedUnit = nil
-    local checkStart = tick()
-    while (tick() - checkStart) < 1.2 do
-        confirmedUnit = findLivePlayerUnit(spotCF.Position, affordableUnit.displayName, 5)
-        if confirmedUnit then break end
-        task.wait(0.1)
-    end
+    local currentAttempt = (macro.failedUnitPlacements[targetUnit.uuid] or 0) + 1
+    macro.aiStatusText = string.format("🚀 กำลังวาง %s [%s] บน %s (ครั้งที่ %d/3)",
+        targetUnit.displayName,
+        targetUnit.isHill and "HILL" or (targetUnit.isFarm and "FARM" or "GROUND"),
+        bestPart and bestPart.Name or "Spot",
+        currentAttempt
+    )
 
-    if confirmedUnit or (getActiveUnitsCount() > currentActive) then
-        -- วางสำเร็จ ล้างประวัติเฟลของตัวนี้ทิ้ง
-        macro.failedUnitPlacements[affordableUnit.uuid] = nil
-        Fluent:Notify({
-            Title    = "🤖 AI Placed Unit",
-            Content  = string.format("วาง %s (%s)\nตำแหน่ง: %s%s\nค่าตัว: %d ¥",
-                affordableUnit.displayName,
-                affordableUnit.isHill and "บนสิ่งก่อสร้าง 🏢" or "บนพื้น 🌿",
-                spotPart and spotPart.Name or "Ground",
-                mobInfoStr,
-                affordableUnit.cost),
-            Duration = 3,
-        })
-        return true
-    else
-        -- ถ้าเซิร์ฟเวอร์ปฏิเสธหรือไม่เกิด นับจำนวนครั้งที่เฟล
-        macro.failedUnitPlacements[affordableUnit.uuid] = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
-        local fails = macro.failedUnitPlacements[affordableUnit.uuid]
+    local prevActiveCount = getActiveUnitsCount()
 
-        -- blacklist จุดนี้ไว้ 25 วินาที แล้ว AI จะเปลี่ยนจุดใหม่ทันทีในรอบถัดไป
+    for candIdx = 1, maxCandidatesToTry do
+        local cand = candidates[candIdx]
+        for _, mOff in ipairs(microOffsets) do
+            local testPos = cand.pos + mOff
+            if not isPositionOccupied(testPos, 3.4) and not isSpotBlacklisted(testPos, 2.5) then
+                local testCF = cand.cf + mOff
+
+                pcall(function()
+                    spawnRemote:InvokeServer(targetUnit.uuid, testCF)
+                end)
+
+                -- Fast confirmation check (0.6s)
+                local checkStart = tick()
+                while (tick() - checkStart) < 0.6 do
+                    if getActiveUnitsCount() > prevActiveCount or findLivePlayerUnit(testCF.Position, targetUnit.displayName, 5) then
+                        placedSuccessfully = true
+                        placedCF = testCF
+                        placedPart = cand.part
+                        break
+                    end
+                    task.wait(0.08)
+                end
+
+                if placedSuccessfully then break end
+            end
+        end
+
+        if placedSuccessfully then break end
+
+        -- ถ้า Candidate นี้วางไม่ได้ ให้ blacklist จุดนี้ไว้ชั่วคราว
         macro.blacklistedSpots = macro.blacklistedSpots or {}
         table.insert(macro.blacklistedSpots, {
-            pos = spotCF.Position,
-            expires = tick() + 25
+            pos = cand.pos,
+            expires = tick() + 30
         })
+    end
+
+    if placedSuccessfully then
+        macro.failedUnitPlacements[targetUnit.uuid] = nil
+        Fluent:Notify({
+            Title    = "🤖 AI Placed Unit",
+            Content  = string.format("วาง %s (%s)\nตำแหน่ง: %s\nค่าตัว: %d ¥",
+                targetUnit.displayName,
+                targetUnit.isHill and "บนสิ่งก่อสร้าง 🏢" or (targetUnit.isFarm and "โซนฟาร์มเงิน 💰" or "บนพื้น 🌿"),
+                placedPart and placedPart.Name or "Ground",
+                targetUnit.cost),
+            Duration = 3,
+        })
+        macro.aiStatusText = string.format("✅ วาง %s สำเร็จ!", targetUnit.displayName)
+        return true
+    else
+        -- ถ้าลองทั้ง 3 Candidate + Micro offsets แล้วยังวางไม่ผ่าน ให้นับเฟล 1 ครั้ง
+        macro.failedUnitPlacements[targetUnit.uuid] = (macro.failedUnitPlacements[targetUnit.uuid] or 0) + 1
+        local fails = macro.failedUnitPlacements[targetUnit.uuid]
 
         if fails >= 3 then
-            macro.aiStatusText = string.format("⏭️ ข้าม %s (วางไม่ผ่าน 3 ครั้ง ➔ ข้ามไปตัวถัดไป)", affordableUnit.displayName)
+            macro.aiStatusText = string.format("⏭️ ข้าม %s (วางไม่ผ่าน 3 ครั้ง ➔ ข้ามไปตัวถัดไป)", targetUnit.displayName)
             Fluent:Notify({
                 Title    = "⚠️ Skip Unit (3/3 Fails)",
-                Content  = string.format("วาง %s ไม่ผ่านครบ 3 ครั้ง!\nระบบข้ามไปวางยูนิตตัวถัดไปในมือทันที", affordableUnit.displayName),
+                Content  = string.format("วาง %s ไม่ผ่านครบ 3 ครั้ง!\nระบบข้ามไปวางยูนิตตัวถัดไปในมือทันที", targetUnit.displayName),
                 Duration = 3.5,
             })
         else
-            macro.aiStatusText = string.format("⚠️ วาง %s ไม่ผ่าน (%d/3 ครั้ง) กำลังลองจุดใหม่...", affordableUnit.displayName, fails)
+            macro.aiStatusText = string.format("⚠️ วาง %s ไม่ผ่าน (%d/3 ครั้ง) กำลังลองรอบหน้า...", targetUnit.displayName, fails)
         end
-
         return false
     end
 end
@@ -3678,7 +3803,7 @@ local function updateAIStatus()
     local units = macro.GetEquippedUnits()
     local unitListStr = {}
     for _, u in ipairs(units) do
-        table.insert(unitListStr, string.format("• [ช่อง %s] %s: %s (%d ¥)", u.slot, u.displayName, u.isHill and "HILL 🏢" or "GROUND 🌿", u.cost))
+        table.insert(unitListStr, string.format("• [ช่อง %s] %s: %s (%d ¥)", u.slot, u.displayName, u.isHill and "HILL 🏢" or (u.isFarm and "FARM 💰" or "GROUND 🌿"), u.cost))
     end
     local unitSummary = #unitListStr > 0 and table.concat(unitListStr, "\n") or "ไม่มีข้อมูลยูนิตในมือ"
 
