@@ -46,7 +46,9 @@ local plr         = game:GetService("Players").LocalPlayer
 local endpoints     = RS:FindFirstChild("endpoints") and RS.endpoints:FindFirstChild("client_to_server")
 local spawnRemote   = endpoints and endpoints:FindFirstChild("spawn_unit")
 local upgradeRemote = endpoints and endpoints:FindFirstChild("upgrade_unit_ingame")
-local sellRemote    = endpoints and endpoints:FindFirstChild("sell_unit_ingame")
+local sellRemote        = endpoints and endpoints:FindFirstChild("sell_unit_ingame")
+local useSpellRemote    = endpoints and endpoints:FindFirstChild("use_ingame_spell")
+local deleteSpellRemote = endpoints and endpoints:FindFirstChild("delete_ingame_spell")
 local moneyLabel    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Resource") and plr.PlayerGui.spawn_units.Lives.Frame.Resource:FindFirstChild("Money") and plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money:FindFirstChild("text")
 local unitsFrame    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Units")
 
@@ -2951,61 +2953,296 @@ end
 
 macro.failedUnitPlacements = macro.failedUnitPlacements or {}
 
-function macro.HandleRefundSpells()
-    if isLobby or not unitsFrame or not macro.autoDeleteRefund then return 0 end
-    local deletedCount = 0
+macro.unitBuffRecords = macro.unitBuffRecords or {
+    merge = {},       -- [unitKey] = true
+    random_buff = {}, -- [unitKey] = true
+}
+
+local function getUnitKey(u)
+    if not u then return nil end
+    local attr = u:GetAttribute("_SPAWN_UNIT_UUID")
+    if attr then return "attr_" .. tostring(attr) end
+    local stats = u:FindFirstChild("_stats")
+    local uid = stats and stats:FindFirstChild("uuid") and stats.uuid.Value
+    if uid and uid ~= "" then return "uuid_" .. tostring(uid) end
+    return "inst_" .. tostring(u:GetDebugId(0))
+end
+
+local function getLivePlayerUnits()
+    local list = {}
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return list end
+
+    for _, u in ipairs(unitsFolder:GetChildren()) do
+        local stats = u:FindFirstChild("_stats")
+        if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+            local dmgObj = stats:FindFirstChild("damage")
+            local farmObj = stats:FindFirstChild("farm_amount")
+            local dmg = (dmgObj and tonumber(dmgObj.Value)) or 0
+            local farmAmt = (farmObj and tonumber(farmObj.Value)) or 0
+            local isFarm = (farmAmt > 0)
+            local uKey = getUnitKey(u)
+
+            table.insert(list, {
+                model   = u,
+                name    = u.Name,
+                key     = uKey,
+                damage  = dmg,
+                isFarm  = isFarm,
+            })
+        end
+    end
+    return list
+end
+
+macro.autoHandleSpells = macro.autoHandleSpells ~= false
+
+function macro.HandleInGameSpells()
+    if isLobby or not unitsFrame or macro.autoHandleSpells == false then return 0 end
+
+    local playerUnits = getLivePlayerUnits()
+
+    -- ล้างประวัติยูนิตที่หายไปหรือตายแล้วออกจากตารางเก็บบัพ
+    local liveKeys = {}
+    for _, item in ipairs(playerUnits) do
+        liveKeys[item.key] = true
+    end
+    for k in pairs(macro.unitBuffRecords.merge) do
+        if not liveKeys[k] then macro.unitBuffRecords.merge[k] = nil end
+    end
+    for k in pairs(macro.unitBuffRecords.random_buff) do
+        if not liveKeys[k] then macro.unitBuffRecords.random_buff[k] = nil end
+    end
+
+    local gold = getGold()
+    local actionsDone = 0
 
     for _, ch in ipairs(unitsFrame:GetChildren()) do
         if ch:IsA("ImageButton") then
             local sn = ch:FindFirstChild("SpellName")
-            local del = ch:FindFirstChild("Delete")
-            local spellTitle = sn and sn.Text or ""
-            local isRefund = spellTitle:lower():find("refund")
+            local spellName = sn and sn.Text or ""
+            local spellLower = spellName:lower()
+            local delBtn = ch:FindFirstChild("Delete")
 
-            if not isRefund and ch.Name == "GameSpellFrame" then
+            -- ถ้าไม่มี SpellName แต่เป็น GameSpellFrame ให้เช็คข้อความใน DescriptionFrame
+            if spellName == "" and ch.Name == "GameSpellFrame" then
                 local descLabel = ch:FindFirstChild("DescriptionFrame", true)
-                if descLabel and descLabel:IsA("TextLabel") and descLabel.Text:lower():find("refund") then
-                    isRefund = true
+                if descLabel and descLabel:IsA("TextLabel") then
+                    spellLower = descLabel.Text:lower()
                 end
             end
 
-            if isRefund and del and del.Visible then
-                local deleted = false
-                if firesignal then
-                    local ok = pcall(function()
-                        firesignal(del.Activated)
-                        pcall(function() firesignal(del.MouseButton1Click) end)
-                    end)
-                    if ok then deleted = true end
-                end
+            local isSpell = (sn ~= nil) or (ch.Name == "GameSpellFrame")
+            if isSpell and (spellName ~= "" or spellLower ~= "") then
+                local slotKey = (ch.LayoutOrder and ch.LayoutOrder > 0 and tostring(ch.LayoutOrder)) or (tonumber(ch.Name) and tostring(ch.Name)) or tostring(ch.Name)
 
-                if not deleted then
-                    local endpoints = RS:FindFirstChild("endpoints") and RS.endpoints:FindFirstChild("client_to_server")
-                    local deleteRemote = endpoints and endpoints:FindFirstChild("delete_ingame_spell")
-                    if deleteRemote then
+                local function discardSpell(reason)
+                    local deleted = false
+                    if delBtn and delBtn.Visible and firesignal then
                         pcall(function()
-                            deleteRemote:InvokeServer(tostring(ch.Name))
+                            firesignal(delBtn.Activated)
+                            pcall(function() firesignal(delBtn.MouseButton1Click) end)
                         end)
                         deleted = true
                     end
+                    if deleteSpellRemote then
+                        pcall(function()
+                            deleteSpellRemote:InvokeServer(slotKey)
+                        end)
+                        deleted = true
+                    end
+                    if deleted then
+                        actionsDone = actionsDone + 1
+                        Fluent:Notify({
+                            Title    = "🗑️ Auto Discard Spell",
+                            Content  = string.format("ทิ้งการ์ด %s [ช่อง %s]\nเหตุผล: %s", spellName ~= "" and spellName or "Spell", slotKey, reason or "ไม่จำเป็น"),
+                            Duration = 2.5,
+                        })
+                    end
+                    return deleted
                 end
 
-                if deleted then
-                    deletedCount = deletedCount + 1
+                -- 1. บัพ Refund: กดทิ้งทันทีเสมอ
+                if spellLower:find("refund") then
+                    if macro.autoDeleteRefund ~= false then
+                        discardSpell("เก็บบัพ Refund ไว้เปลืองช่อง")
+                    end
+
+                -- 2. บัพ Merge:
+                -- กฎ: ใส่ให้ทีละตัวจนครบทุกตัว ถ้าครบแล้วหรือไม่มีตัวให้ใส่ ➔ กดทิ้งทันที
+                -- ข้อห้าม: Merge และ Random Buff ห้ามซ้ำกับตัวเดียวกัน!
+                elseif spellLower:find("merge") or spellLower:find("sacrifice") then
+                    local eligibleList = {}
+                    for _, uItem in ipairs(playerUnits) do
+                        local hasMerge = macro.unitBuffRecords.merge[uItem.key]
+                        local hasRandBuff = macro.unitBuffRecords.random_buff[uItem.key]
+                        -- ห้ามใส่ตัวที่เคยได้ Merge และห้ามใส่ตัวที่เคยได้ Random Buff
+                        if not hasMerge and not hasRandBuff then
+                            table.insert(eligibleList, uItem)
+                        end
+                    end
+
+                    if #eligibleList == 0 then
+                        -- ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว ➔ กดทิ้งทันที!
+                        discardSpell("ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว")
+                    else
+                        -- เรียงลำดับ: ให้ตัวดาเมจก่อนตัวเงิน -> ดาเมจสูงสุดก่อน
+                        table.sort(eligibleList, function(a, b)
+                            if a.isFarm ~= b.isFarm then
+                                return not a.isFarm
+                            end
+                            return a.damage > b.damage
+                        end)
+
+                        local target = eligibleList[1]
+                        if gold >= 1000 then
+                            if useSpellRemote then
+                                local ok = pcall(function()
+                                    useSpellRemote:InvokeServer(slotKey, target.model)
+                                end)
+                                if ok then
+                                    macro.unitBuffRecords.merge[target.key] = true
+                                    actionsDone = actionsDone + 1
+                                    Fluent:Notify({
+                                        Title    = "🔮 Used Spell: Merge",
+                                        Content  = string.format("ใส่ Merge ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มีบัพเหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
+                                        Duration = 3,
+                                    })
+                                    macro.aiStatusText = string.format("🔮 ใส่ Merge ให้ %s", target.name)
+                                end
+                            end
+                        else
+                            macro.aiStatusText = string.format("⏳ รอเงิน 1,000 ¥ ใส่ Merge ให้ %s (มี %d ¥)", target.name, gold)
+                        end
+                    end
+
+                -- 3. บัพ Random Buff:
+                -- กฎ: ใส่ให้ทีละตัว ห้ามซ้ำกับตัวที่มี Random Buff หรือ Merge แล้ว
+                -- ถ้าครบทุกตัวแล้ว ➔ กดทิ้งทันที!
+                elseif spellLower:find("random buff") or spellLower:find("random_buff") then
+                    local eligibleList = {}
+                    for _, uItem in ipairs(playerUnits) do
+                        local hasMerge = macro.unitBuffRecords.merge[uItem.key]
+                        local hasRandBuff = macro.unitBuffRecords.random_buff[uItem.key]
+                        -- ห้ามใส่ตัวที่เคยได้ Random Buff และห้ามใส่ตัวที่เคยได้ Merge
+                        if not hasRandBuff and not hasMerge then
+                            table.insert(eligibleList, uItem)
+                        end
+                    end
+
+                    if #eligibleList == 0 then
+                        -- ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว ➔ กดทิ้งทันที!
+                        discardSpell("ยูนิตทุกตัวในสนามได้รับบัพครบหมดแล้ว")
+                    else
+                        -- เรียงลำดับ: ให้ตัวดาเมจก่อนตัวเงิน -> ดาเมจสูงสุดก่อน
+                        table.sort(eligibleList, function(a, b)
+                            if a.isFarm ~= b.isFarm then
+                                return not a.isFarm
+                            end
+                            return a.damage > b.damage
+                        end)
+
+                        local target = eligibleList[1]
+                        if gold >= 1000 then
+                            if useSpellRemote then
+                                local ok = pcall(function()
+                                    useSpellRemote:InvokeServer(slotKey, target.model)
+                                end)
+                                if ok then
+                                    macro.unitBuffRecords.random_buff[target.key] = true
+                                    actionsDone = actionsDone + 1
+                                    Fluent:Notify({
+                                        Title    = "✨ Used Spell: Random Buff",
+                                        Content  = string.format("ใส่ Random Buff ให้ %s (DPS: %.0f) [ช่อง %s]\nตัวที่ยังไม่มีบัพเหลือ: %d ตัว", target.name, target.damage, slotKey, #eligibleList - 1),
+                                        Duration = 3,
+                                    })
+                                    macro.aiStatusText = string.format("✨ ใส่ Random Buff ให้ %s", target.name)
+                                end
+                            end
+                        else
+                            macro.aiStatusText = string.format("⏳ รอเงิน 1,000 ¥ ใส่ Random Buff ให้ %s (มี %d ¥)", target.name, gold)
+                        end
+                    end
+
+                -- 4. บัพ Clone:
+                -- กฎ: ให้ Clone ตัวที่ดาเมจสูงที่สุดเสมอ! (ไม่โคลนตัวฟาร์มเงิน)
+                elseif spellLower:find("clone") then
+                    local combatUnits = {}
+                    for _, uItem in ipairs(playerUnits) do
+                        if not uItem.isFarm and uItem.damage > 0 then
+                            table.insert(combatUnits, uItem)
+                        end
+                    end
+
+                    if #combatUnits > 0 then
+                        table.sort(combatUnits, function(a, b)
+                            return a.damage > b.damage
+                        end)
+
+                        local bestTarget = combatUnits[1]
+                        if gold >= 5000 then
+                            if useSpellRemote then
+                                local ok = pcall(function()
+                                    useSpellRemote:InvokeServer(slotKey, bestTarget.model)
+                                end)
+                                if ok then
+                                    actionsDone = actionsDone + 1
+                                    Fluent:Notify({
+                                        Title    = "👥 Used Spell: Clone",
+                                        Content  = string.format("โคลนยูนิตที่ดาเมจสูงสุด: %s\nดาเมจปัจจุบัน: %.0f", bestTarget.name, bestTarget.damage),
+                                        Duration = 3.5,
+                                    })
+                                    macro.aiStatusText = string.format("👥 โคลนตัวดาเมจสูงสุด %s (%.0f dmg)", bestTarget.name, bestTarget.damage)
+                                end
+                            end
+                        else
+                            macro.aiStatusText = string.format("⏳ รอเงิน 5,000 ¥ โคลน %s (มี %d ¥)", bestTarget.name, gold)
+                        end
+                    end
+
+                -- 5. บัพ Astral Gate:
+                -- ค่าร่าย 2,500 ¥ (Instant)
+                elseif spellLower:find("gate") or spellLower:find("astral gate") then
+                    if gold >= 2500 then
+                        if useSpellRemote then
+                            pcall(function()
+                                useSpellRemote:InvokeServer(slotKey)
+                            end)
+                            actionsDone = actionsDone + 1
+                            Fluent:Notify({
+                                Title    = "🌌 Used Spell: Astral Gate",
+                                Content  = "เปิดใช้งาน Astral Gate สำเร็จ!",
+                                Duration = 3,
+                            })
+                        end
+                    end
+
+                -- 6. บัพ Astral Summon:
+                -- ค่าร่าย 10,000 ¥ (Instant)
+                elseif spellLower:find("summon") or spellLower:find("astral summon") then
+                    if gold >= 10000 then
+                        if useSpellRemote then
+                            pcall(function()
+                                useSpellRemote:InvokeServer(slotKey)
+                            end)
+                            actionsDone = actionsDone + 1
+                            Fluent:Notify({
+                                Title    = "🌟 Used Spell: Astral Summon",
+                                Content  = "อัญเชิญยูนิตสุ่มระดับสูงลงช่องสำเร็จ!",
+                                Duration = 3.5,
+                            })
+                        end
+                    end
                 end
             end
         end
     end
 
-    if deletedCount > 0 then
-        Fluent:Notify({
-            Title    = "🗑️ Auto Refund Deleted",
-            Content  = string.format("กดปุ่มกากบาท (X) ลบบัพ Refund ออก %d ช่องเรียบร้อย!", deletedCount),
-            Duration = 2.5,
-        })
-    end
+    return actionsDone
+end
 
-    return deletedCount
+function macro.HandleRefundSpells()
+    return macro.HandleInGameSpells()
 end
 
 function macro.RunAIPlacementStep()
@@ -3472,6 +3709,36 @@ Tabs.Event:AddButton({
     end,
 })
 
+local AutoHandleSpellsToggle = Tabs.Event:AddToggle("AutoHandleSpellsToggle", {
+    Title       = "จัดการสเปลและบัพอัตโนมัติ (Auto Handle Spells)",
+    Description = "Merge ทีละตัวจนครบ (ครบแล้วกดทิ้ง) / Clone ตัวดาเมจสูงสุด / Random Buff ไม่ซ้ำกับ Merge",
+    Default     = macro.autoHandleSpells ~= false,
+})
+
+AutoHandleSpellsToggle:OnChanged(function()
+    macro.autoHandleSpells = Fluent.Options.AutoHandleSpellsToggle.Value
+    macro.SaveSettings()
+    updateAIStatus()
+    Fluent:Notify({
+        Title   = "Auto Handle Spells",
+        Content = macro.autoHandleSpells and "🟢 เปิดใช้งานจัดการ Spells อัตโนมัติ" or "🔴 ปิดใช้งานจัดการ Spells",
+        Duration = 3,
+    })
+end)
+
+Tabs.Event:AddButton({
+    Title       = "🔮 จัดการสเปลทันที (Force Handle Spells Now)",
+    Description = "สั่งให้ AI ใช้งาน Merge / Clone / Random Buff หรือกดทิ้งใบที่ไม่จำเป็นทันที",
+    Callback    = function()
+        local count = macro.HandleInGameSpells()
+        Fluent:Notify({
+            Title   = "Spells Result",
+            Content = count > 0 and string.format("ดำเนินการจัดการสเปลเรียบร้อย (%d รายการ)", count) or "ไม่พบสเปลที่ดำเนินการได้ในขณะนี้",
+            Duration = 2.5,
+        })
+    end,
+})
+
 local AutoDeleteRefundToggle = Tabs.Event:AddToggle("AutoDeleteRefundToggle", {
     Title       = "ลบบัพ Refund อัตโนมัติ (Auto Delete Refund Spells)",
     Description = "เมื่อได้รับบัพ Refund จะกดปุ่มกากบาท (X) ลบทิ้งทันที เพื่อเปิดทางให้บัพอื่น",
@@ -3505,9 +3772,9 @@ task.spawn(function()
     while true do
         if not isLobby then
             pcall(function()
-                -- ลบบัพ Refund ออกอัตโนมัติถ้าเปิดใช้งาน
-                if macro.autoDeleteRefund then
-                    macro.HandleRefundSpells()
+                -- จัดการ Spells & Buffs (Merge / Clone / Random Buff / Refund) ทั้งหมด
+                if macro.autoHandleSpells ~= false or macro.autoDeleteRefund then
+                    macro.HandleInGameSpells()
                 end
 
                 if macro.aiAutoplay or macro.aiAutoUpgrade then
