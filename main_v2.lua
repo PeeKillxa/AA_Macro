@@ -67,15 +67,24 @@ local function getUnitsData()
             end
         end
     end)
+    if not UnitsData and RS:FindFirstChild("src") and RS.src:FindFirstChild("Data") and RS.src.Data:FindFirstChild("Units") then
+        pcall(function()
+            UnitsData = require(RS.src.Data.Units)
+        end)
+    end
     return UnitsData
 end
 
 local function getUnitUpgradeCostFromData(unitId, targetLevel)
     local data = getUnitsData()
-    if data and unitId and data[unitId] and data[unitId].upgrade then
-        local info = data[unitId].upgrade[targetLevel]
-        if info and info.cost then
-            return info.cost
+    if data and unitId then
+        local cleanId = tostring(unitId):gsub("_unit$", "")
+        local u = data[unitId] or data[cleanId]
+        if u and u.upgrade and targetLevel and tonumber(targetLevel) then
+            local info = u.upgrade[tonumber(targetLevel)]
+            if info and info.cost then
+                return tonumber(info.cost)
+            end
         end
     end
     return nil
@@ -83,8 +92,12 @@ end
 
 local function getUnitSpawnCostFromData(unitId)
     local data = getUnitsData()
-    if data and unitId and data[unitId] and data[unitId].cost then
-        return data[unitId].cost
+    if data and unitId then
+        local cleanId = tostring(unitId):gsub("_unit$", "")
+        local u = data[unitId] or data[cleanId]
+        if u and u.cost then
+            return tonumber(u.cost)
+        end
     end
     return nil
 end
@@ -3427,156 +3440,211 @@ function macro.RunAIPlacementStep()
     end
 end
 
-function macro.RunAIUpgradeStep(isForce)
-    if isLobby or not upgradeRemote or not macro.aiAutoUpgrade then return false end
-
-    local currentActive = getActiveUnitsCount()
-    local maxLimit = tonumber(macro.aiMaxUnits) or 20
-
-    -- กฎเหล็ก: ต้องวางให้ครบ 20 ตัวก่อน จึงจะเริ่มอัปเกรด (เว้นแต่กดปุ่ม Force แบบ manual)
-    if not isForce and macro.aiAutoplay and currentActive < maxLimit then
-        return false
-    end
+function macro.UpgradeFarmUnits()
+    if isLobby or not upgradeRemote or not macro.aiAutoUpgrade then return 0 end
 
     local gold = getGold()
-    if gold <= 0 then return false end
+    if gold <= 0 then return 0 end
 
     local unitsFolder = workspace:FindFirstChild("_UNITS")
-    if not unitsFolder then return false end
+    if not unitsFolder then return 0 end
 
     local allUnitsData = getUnitsData()
-    local farmUpgradable = {}
-    local combatUpgradable = {}
+    local farmUnits = {}
 
     for _, u in ipairs(unitsFolder:GetChildren()) do
         local stats = u:FindFirstChild("_stats")
         if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
             local upgObj = stats:FindFirstChild("upgrade")
             local maxUpgObj = stats:FindFirstChild("max_upgrade")
-            local curLvl = upgObj and upgObj.Value or 0
-            local maxLvl = maxUpgObj and maxUpgObj.Value or 0
-            local uId = stats:FindFirstChild("id") and stats.id.Value or u.Name
-            local uData = allUnitsData and (allUnitsData[uId] or allUnitsData[u.Name])
+            local curLvl = upgObj and tonumber(upgObj.Value) or 0
+            local maxLvl = maxUpgObj and tonumber(maxUpgObj.Value) or 0
 
             if curLvl < maxLvl then
-                -- ตรวจสอบตัวเงิน / ยูนิตฟาร์มเงิน:
-                -- 1. มี _stats.farm_amount > 0 (เช่น Speedwagon)
-                -- 2. หรือมี farm_amount > 0 ในฐานข้อมูลของยูนิต
                 local farmVal = stats:FindFirstChild("farm_amount")
                 local farmAmount = (farmVal and tonumber(farmVal.Value)) or 0
+                local cleanId = u.Name:gsub("_unit$", "")
+                local uData = allUnitsData and (allUnitsData[u.Name] or allUnitsData[cleanId])
+
                 if farmAmount == 0 and uData and uData.farm_amount and tonumber(uData.farm_amount) then
                     farmAmount = tonumber(uData.farm_amount)
                 end
-                local isFarm = (farmAmount > 0)
 
-                local nextCost = getUnitUpgradeCostFromData(uId, curLvl + 1) or getUnitUpgradeCostFromData(uId, curLvl) or 0
-                local displayName = (uData and uData.name) or u.Name
-                local entry = {
-                    model       = u,
-                    name        = u.Name,
-                    unitId      = uId,
-                    displayName = displayName,
-                    level       = curLvl,
-                    maxLevel    = maxLvl,
-                    nextCost    = nextCost,
-                    isFarm      = isFarm,
-                    farmAmount  = farmAmount,
-                }
+                local nameLower = u.Name:lower()
+                local isFarm = (farmAmount > 0) or nameLower:find("speedwagon") or nameLower:find("bulma") or nameLower:find("farm")
 
                 if isFarm then
-                    table.insert(farmUpgradable, entry)
-                else
-                    table.insert(combatUpgradable, entry)
+                    local nextCost = getUnitUpgradeCostFromData(cleanId, curLvl + 1)
+                        or getUnitUpgradeCostFromData(u.Name, curLvl + 1)
+                        or 1000
+
+                    table.insert(farmUnits, {
+                        model       = u,
+                        name        = u.Name,
+                        displayName = (uData and uData.name) or u.Name,
+                        curLvl      = curLvl,
+                        maxLvl      = maxLvl,
+                        nextCost    = nextCost,
+                        farmAmount  = farmAmount,
+                    })
                 end
             end
         end
     end
 
-    if #farmUpgradable == 0 and #combatUpgradable == 0 then
-        return false
-    end
+    if #farmUnits == 0 then return 0 end
 
-    local target = nil
-
-    -- ── ขั้นตอนที่ 1: อัปเกรดยูนิตฟาร์มเงิน (Speedwagon) ให้ตันก่อนเสมอ ──
-    if #farmUpgradable > 0 then
-        -- เรียงลำดับตัวเงิน: เลเวลต่ำสุดก่อน -> ราคาถูกสุดก่อน
-        table.sort(farmUpgradable, function(a, b)
-            if a.level == b.level then
-                return a.nextCost < b.nextCost
-            end
-            return a.level < b.level
-        end)
-
-        local topFarm = farmUpgradable[1]
-        local needCost = topFarm.nextCost > 0 and topFarm.nextCost or 1000
-        if gold < needCost then
-            -- ถ้าเงินยังไม่พอสำหรับตัวเงิน ให้กักเงินรอไว้ ไม่อัปเกรดยูนิตดาเมจอื่นเด็ดขาด!
-            macro.aiStatusText = string.format("⏳ รอเงินอัปเกรดยูนิตฟาร์มเงิน %s (มี %d ¥ │ ขาด %d ¥)", topFarm.displayName, gold, needCost - gold)
-            return false
+    -- ลำดับการอัปเกรดตัวฟาร์มเงิน: เลเวลต่ำสุดก่อน -> ราคาถูกสุดก่อน
+    table.sort(farmUnits, function(a, b)
+        if a.curLvl == b.curLvl then
+            return a.nextCost < b.nextCost
         end
-
-        target = topFarm
-    else
-        -- ── ขั้นตอนที่ 2: เมื่อตัวเงินตันครบหมดแล้ว จึงอัปเกรดยูนิตดาเมจทั่วไป ──
-        local affordableCombat = {}
-        for _, item in ipairs(combatUpgradable) do
-            if item.nextCost > 0 and gold >= item.nextCost then
-                table.insert(affordableCombat, item)
-            elseif item.nextCost == 0 and gold >= 300 then
-                table.insert(affordableCombat, item)
-            end
-        end
-
-        if #affordableCombat == 0 then
-            local minCost = 999999
-            for _, item in ipairs(combatUpgradable) do
-                if item.nextCost > 0 and item.nextCost < minCost then
-                    minCost = item.nextCost
-                end
-            end
-            if minCost ~= 999999 then
-                macro.aiStatusText = string.format("⏳ รอเงินอัปเกรด... (มี %d ¥ │ ขั้นต่ำ %d ¥)", gold, minCost)
-            end
-            return false
-        end
-
-        -- เรียงลำดับตัวที่เลเวลต่ำสุด หรือราคาถูกสุดก่อน เพื่อกระจายดาเมจให้ทั่วถึง
-        table.sort(affordableCombat, function(a, b)
-            if a.level == b.level then
-                return a.nextCost < b.nextCost
-            end
-            return a.level < b.level
-        end)
-
-        target = affordableCombat[1]
-    end
-
-    if not target then return false end
-
-    local beforeLvl = target.level
-    local okInvoke, resInvoke = pcall(function()
-        return upgradeRemote:InvokeServer(target.model)
+        return a.curLvl < b.curLvl
     end)
 
-    task.wait(0.2)
-    local stats = target.model:FindFirstChild("_stats")
-    local curLvl = stats and stats:FindFirstChild("upgrade") and stats.upgrade.Value or beforeLvl
-    if curLvl > beforeLvl then
-        local farmTag = target.isFarm and " 💰 [ตัวฟาร์มเงิน]" or ""
-        Fluent:Notify({
-            Title    = "⚡ AI Auto Upgraded" .. farmTag,
-            Content  = string.format("อัปเกรด %s ขึ้น Lv.%d/%d\nค่าอัปเกรด: %d ¥",
-                target.displayName,
-                curLvl, target.maxLevel,
-                target.nextCost),
-            Duration = 2.5,
-        })
-        macro.aiStatusText = string.format("⚡ อัปเกรด %s%s [Lv.%d ➔ %d/%d]", target.displayName, farmTag, beforeLvl, curLvl, target.maxLevel)
-        return true
+    local totalUpgrades = 0
+    -- ทำการ Burst Upgrade ตัวฟาร์มเงินทันทีจนกว่าจะเต็ม Max Level หรือเงินหมด
+    for _, farm in ipairs(farmUnits) do
+        local currentLvl = farm.curLvl
+        while currentLvl < farm.maxLvl do
+            gold = getGold()
+            local cleanId = farm.name:gsub("_unit$", "")
+            local cost = getUnitUpgradeCostFromData(cleanId, currentLvl + 1)
+                or getUnitUpgradeCostFromData(farm.name, currentLvl + 1)
+                or farm.nextCost
+
+            if gold < cost then
+                macro.aiStatusText = string.format("⏳ รอเงินอัปเกรดยูนิตฟาร์มเงิน %s [Lv.%d ➔ %d/%d] (มี %d ¥ │ ขาด %d ¥)",
+                    farm.displayName, currentLvl, currentLvl + 1, farm.maxLvl, gold, cost - gold)
+                break
+            end
+
+            local okInvoke = pcall(function()
+                return upgradeRemote:InvokeServer(farm.model)
+            end)
+
+            task.wait(0.08)
+
+            local stats = farm.model:FindFirstChild("_stats")
+            local newLvl = stats and stats:FindFirstChild("upgrade") and tonumber(stats.upgrade.Value) or currentLvl
+            if newLvl > currentLvl then
+                currentLvl = newLvl
+                totalUpgrades = totalUpgrades + 1
+                Fluent:Notify({
+                    Title    = "💰 AI Auto Upgraded [ตัวฟาร์มเงิน]",
+                    Content  = string.format("อัปเกรด %s ขึ้น Lv.%d/%d\nค่าอัปเกรด: %d ¥",
+                        farm.displayName, currentLvl, farm.maxLvl, cost),
+                    Duration = 2.5,
+                })
+                macro.aiStatusText = string.format("💰 อัปเกรดตัวฟาร์มเงิน %s [Lv.%d/%d]", farm.displayName, currentLvl, farm.maxLvl)
+            else
+                break
+            end
+        end
     end
 
-    return false
+    return totalUpgrades
+end
+
+function macro.RunAIUpgradeStep(burstLimit)
+    if isLobby or not upgradeRemote or not macro.aiAutoUpgrade then return 0 end
+
+    local maxBurst = tonumber(burstLimit) or 5
+    local gold = getGold()
+    if gold <= 0 then return 0 end
+
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return 0 end
+
+    local allUnitsData = getUnitsData()
+    local burstDone = 0
+
+    while burstDone < maxBurst do
+        gold = getGold()
+        if gold < 300 then break end
+
+        local combatUpgradable = {}
+
+        for _, u in ipairs(unitsFolder:GetChildren()) do
+            local stats = u:FindFirstChild("_stats")
+            if stats and stats:FindFirstChild("player") and stats.player.Value == plr then
+                local upgObj = stats:FindFirstChild("upgrade")
+                local maxUpgObj = stats:FindFirstChild("max_upgrade")
+                local curLvl = upgObj and tonumber(upgObj.Value) or 0
+                local maxLvl = maxUpgObj and tonumber(maxUpgObj.Value) or 0
+
+                if curLvl < maxLvl then
+                    local farmVal = stats:FindFirstChild("farm_amount")
+                    local farmAmount = (farmVal and tonumber(farmVal.Value)) or 0
+                    local cleanId = u.Name:gsub("_unit$", "")
+                    local uData = allUnitsData and (allUnitsData[u.Name] or allUnitsData[cleanId])
+
+                    if farmAmount == 0 and uData and uData.farm_amount and tonumber(uData.farm_amount) then
+                        farmAmount = tonumber(uData.farm_amount)
+                    end
+
+                    local nameLower = u.Name:lower()
+                    local isFarm = (farmAmount > 0) or nameLower:find("speedwagon") or nameLower:find("bulma") or nameLower:find("farm")
+
+                    -- เน้นอัปเกรดยูนิตดาเมจต่อสู้ (เพราะตัวฟาร์มเงินถูกจัดการแยกโดย UpgradeFarmUnits แล้ว)
+                    if not isFarm then
+                        local nextCost = getUnitUpgradeCostFromData(cleanId, curLvl + 1)
+                            or getUnitUpgradeCostFromData(u.Name, curLvl + 1)
+                            or 500
+
+                        local displayName = (uData and uData.name) or u.Name
+                        if gold >= nextCost then
+                            table.insert(combatUpgradable, {
+                                model       = u,
+                                name        = u.Name,
+                                displayName = displayName,
+                                curLvl      = curLvl,
+                                maxLvl      = maxLvl,
+                                nextCost    = nextCost,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+
+        if #combatUpgradable == 0 then
+            break
+        end
+
+        -- เรียงลำดับ: เลเวลต่ำสุดก่อน -> ราคาถูกสุดก่อน เพื่อกระจายดาเมจให้ทั่วถึงและคุ้มเงินที่สุด
+        table.sort(combatUpgradable, function(a, b)
+            if a.curLvl == b.curLvl then
+                return a.nextCost < b.nextCost
+            end
+            return a.curLvl < b.curLvl
+        end)
+
+        local target = combatUpgradable[1]
+        local beforeLvl = target.curLvl
+        local okInvoke = pcall(function()
+            return upgradeRemote:InvokeServer(target.model)
+        end)
+
+        task.wait(0.08)
+
+        local stats = target.model:FindFirstChild("_stats")
+        local newLvl = stats and stats:FindFirstChild("upgrade") and tonumber(stats.upgrade.Value) or beforeLvl
+        if newLvl > beforeLvl then
+            burstDone = burstDone + 1
+            Fluent:Notify({
+                Title    = "⚡ AI Auto Upgraded [ดาเมจ]",
+                Content  = string.format("อัปเกรด %s ขึ้น Lv.%d/%d\nค่าอัปเกรด: %d ¥",
+                    target.displayName, newLvl, target.maxLvl, target.nextCost),
+                Duration = 2,
+            })
+            macro.aiStatusText = string.format("⚡ อัปเกรดยูนิต %s [Lv.%d ➔ %d/%d]", target.displayName, beforeLvl, newLvl, target.maxLvl)
+        else
+            break
+        end
+    end
+
+    return burstDone
 end
 
 Tabs.Event:AddSection("🤖 AI AUTOPLAY (โหมดสุ่มตัวละคร / MAP)")
@@ -3735,16 +3803,23 @@ Tabs.Event:AddButton({
 })
 
 Tabs.Event:AddButton({
-    Title       = "⚡ อัปเกรดยูนิต AI ทันที (Force Upgrade 1 Unit)",
-    Description = "สั่งให้ AI ตรวจสอบเงินและอัปเกรดยูนิตในสนามที่ยังไม่ตันทันที 1 ขั้น (เน้นตัวเงินก่อน)",
+    Title       = "⚡ อัปเกรดยูนิต AI ทันที (Force Burst Upgrade)",
+    Description = "สั่งให้ AI อัปเกรดยูนิตฟาร์มเงินทันที และ Burst อัปเกรดยูนิตดาเมจ 5 เลเวลรวด",
     Callback    = function()
         task.spawn(function()
-            local success = macro.RunAIUpgradeStep(true)
+            local farmDone = macro.UpgradeFarmUnits()
+            local combatDone = macro.RunAIUpgradeStep(5)
             updateAIStatus()
-            if not success then
+            if farmDone == 0 and combatDone == 0 then
                 Fluent:Notify({
                     Title    = "AI Upgrade Result",
                     Content  = macro.aiStatusText or "เงินไม่พอหรือยูนิตทุกตัวตันแล้ว",
+                    Duration = 3,
+                })
+            else
+                Fluent:Notify({
+                    Title    = "AI Upgrade Result",
+                    Content  = string.format("อัปเกรดสำเร็จ! (ตัวเงิน %d ครั้ง │ ตัวดาเมจ %d ครั้ง)", farmDone, combatDone),
                     Duration = 3,
                 })
             end
@@ -3868,21 +3943,32 @@ task.spawn(function()
     while true do
         if not isLobby then
             pcall(function()
-                -- จัดการ Spells & Buffs (Merge / Clone / Random Buff / Refund) ทั้งหมด
+                -- 1. จัดการ Spells & Buffs (Merge / Clone / Random Buff / ทิ้งยูนิตเมื่อครบ 20 ตัว)
                 if macro.autoHandleSpells ~= false or macro.autoDeleteRefund then
                     macro.HandleInGameSpells()
                 end
 
+                -- 2. กฎเหล็ก: อัปเกรดยูนิตฟาร์มเงิน (Speedwagon / Bulma) ให้ตันก่อนเสมอทุกรอบที่มีเงิน!
+                if macro.aiAutoUpgrade then
+                    macro.UpgradeFarmUnits()
+                end
+
+                -- 3. ตรวจสอบการวางยูนิต และอัปเกรดยูนิตต่อสู้
                 if macro.aiAutoplay or macro.aiAutoUpgrade then
                     local currentActive = getActiveUnitsCount()
                     local maxLimit = tonumber(macro.aiMaxUnits) or 20
 
                     if macro.aiAutoplay and currentActive < maxLimit then
-                        -- โหมดวางตัว: วางให้ครบ 20 ตัวก่อนเท่านั้น งดอัปเกรดเพื่อประหยัดเงินไว้วางตัวละคร
-                        macro.RunAIPlacementStep()
+                        -- พยายามวางตัวละครให้ครบโควตา 20 ตัว
+                        local placed = macro.RunAIPlacementStep()
+                        -- ถ้ารอบนี้วางไม่ได้ (เช่น รอคูลดาวน์จุด, ยูนิตในมือไม่มี, หรือติดสเปล)
+                        -- และเงินเหลือเกิน 1,200 ¥ ให้อัปเกรดยูนิตดาเมจช่วยป้องกันฐานทันที อย่าปล่อยให้เงินค้างจนฐานแตก!
+                        if not placed and macro.aiAutoUpgrade and getGold() >= 1200 then
+                            macro.RunAIUpgradeStep(3)
+                        end
                     elseif macro.aiAutoUpgrade then
-                        -- วางครบ 20 ตัวแล้ว (หรือไม่ได้เปิด AI Placement) จึงเริ่มระบบอัปเกรด
-                        macro.RunAIUpgradeStep()
+                        -- วางครบ 20 ตัวแล้ว: Burst Upgrade อัปเกรดยูนิตดาเมจรวดเร็ว สูงสุด 10 เลเวลต่อรอบ
+                        macro.RunAIUpgradeStep(10)
                     end
                     updateAIStatus()
                 end
