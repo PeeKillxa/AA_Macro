@@ -4,11 +4,13 @@
 --  File: AA_Macro/main_v2.lua
 -- ============================================================
 
--- ── Check Lobby Guard ────────────────────────────────────────
+-- ── Location Check (Lobby vs Combat) ────────────────────────
 local LOBBY_PLACE_ID = 8304191830
-if game.PlaceId == LOBBY_PLACE_ID then
-    warn("[AA Macro] ⚠️ ปฏิเสธการรัน: อยู่ใน Lobby (PlaceId: 8304191830) สคริปต์นี้สำหรับแมพต่อสู้เท่านั้นเพื่อความปลอดภัย")
-    return
+local isLobby = (game.PlaceId == LOBBY_PLACE_ID)
+if isLobby then
+    print("[AA Macro] 🏠 สถานะ: อยู่ใน Lobby (PlaceId: 8304191830) — เปิดโหมด Event & Matchmaking")
+else
+    print("[AA Macro] ⚔️ สถานะ: อยู่ในแมพต่อสู้ (PlaceId: " .. tostring(game.PlaceId) .. ") — เปิดโหมด Macro & Battlefield")
 end
 
 -- ── 0. Cleanup Previous Window & Overlays ───────────────────
@@ -41,11 +43,12 @@ local HttpService = game:GetService("HttpService")
 local UIS         = game:GetService("UserInputService")
 local plr         = game:GetService("Players").LocalPlayer
 
-local spawnRemote   = RS.endpoints.client_to_server.spawn_unit
-local upgradeRemote = RS.endpoints.client_to_server.upgrade_unit_ingame
-local sellRemote    = RS.endpoints.client_to_server.sell_unit_ingame
-local moneyLabel    = plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money.text
-local unitsFrame    = plr.PlayerGui.spawn_units.Lives.Frame.Units
+local endpoints     = RS:FindFirstChild("endpoints") and RS.endpoints:FindFirstChild("client_to_server")
+local spawnRemote   = endpoints and endpoints:FindFirstChild("spawn_unit")
+local upgradeRemote = endpoints and endpoints:FindFirstChild("upgrade_unit_ingame")
+local sellRemote    = endpoints and endpoints:FindFirstChild("sell_unit_ingame")
+local moneyLabel    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Resource") and plr.PlayerGui.spawn_units.Lives.Frame.Resource:FindFirstChild("Money") and plr.PlayerGui.spawn_units.Lives.Frame.Resource.Money:FindFirstChild("text")
+local unitsFrame    = plr.PlayerGui:FindFirstChild("spawn_units") and plr.PlayerGui.spawn_units:FindFirstChild("Lives") and plr.PlayerGui.spawn_units.Lives:FindFirstChild("Frame") and plr.PlayerGui.spawn_units.Lives.Frame:FindFirstChild("Units")
 
 -- โหลดฐานข้อมูล Units ผ่าน Loader ของเกม เพื่อดึงราคา Upgrade และ Spawn จริงทุกยูนิต
 local UnitsData = nil
@@ -433,6 +436,12 @@ _G.AAMacro = {
     _matchStartTime        = nil,
     _hasSentMatchWebhook   = false,
     _lastWebhookStatus     = "ยังไม่มีการส่ง",
+    -- ── April Fool's Event ──────────────────────
+    eventAutoPlay          = false,
+    eventInterval          = 3.0,
+    eventAttempts          = 0,
+    eventLastCaptcha       = "-",
+    eventStatusText        = "⏹️ STANDBY — รอคำสั่ง",
 }
 local macro = _G.AAMacro
 
@@ -2054,6 +2063,7 @@ _G.AAMacroUI = Window
 
 local Tabs = {
     Macro       = Window:AddTab({ Title = "Macro",       Icon = "play" }),
+    Event       = Window:AddTab({ Title = "Event",       Icon = "sparkles" }),
     Battlefield = Window:AddTab({ Title = "Battlefield", Icon = "gauge" }),
     Webhook     = Window:AddTab({ Title = "Webhook",     Icon = "bell" }),
     Log         = Window:AddTab({ Title = "Action Log",  Icon = "list" }),
@@ -2452,7 +2462,195 @@ Tabs.Macro:AddButton({
 })
 
 -- ────────────────────────────────────────────────────────────
--- ── 11. BATTLEFIELD TAB (Live Game Telemetry) ───────────────
+-- ── 11. EVENT TAB (April Fool's Event Auto Play) ─────────────
+-- ────────────────────────────────────────────────────────────
+Tabs.Event:AddSection("⚡ EVENT LIVE STATUS")
+
+local EventStatusCard = Tabs.Event:AddParagraph({
+    Title   = "🎪 สถานะ April Fool's Event",
+    Content = macro.eventStatusText,
+})
+
+local function updateEventStatus(txt)
+    macro.eventStatusText = txt
+    if EventStatusCard then
+        EventStatusCard:SetDesc(txt .. "\nรอบที่พยายาม: " .. tostring(macro.eventAttempts) .. " | Captcha ล่าสุด: " .. tostring(macro.eventLastCaptcha))
+    end
+    print("[AA Event] " .. txt)
+end
+
+Tabs.Event:AddSection("🎮 EVENT CONTROLS")
+
+local EventToggle = Tabs.Event:AddToggle("AutoPlayEventToggle", {
+    Title   = "Auto Play April Fool's Event",
+    Default = false,
+    Description = "กดปุ่ม EventTeleport -> เดินเข้าประตู Event3 -> กด Find Match -> ออโต้แก้ Captcha & Submit",
+})
+
+EventToggle:OnChanged(function()
+    macro.eventAutoPlay = Fluent.Options.AutoPlayEventToggle.Value
+    if macro.eventAutoPlay then
+        updateEventStatus("🟢 เริ่มต้นทำงาน Auto Play April Fool's Event")
+    else
+        updateEventStatus("⏹️ หยุดการทำงาน Auto Play")
+    end
+end)
+
+Tabs.Event:AddSlider("EventIntervalSlider", {
+    Title = "ระยะห่างการตรวจสอบ (วินาที)",
+    Default = 3,
+    Min = 1,
+    Max = 10,
+    Rounding = 1,
+    Callback = function(val)
+        macro.eventInterval = val
+    end,
+})
+
+local function runEventSequence()
+    macro.eventAttempts = macro.eventAttempts + 1
+
+    if game.PlaceId ~= 8304191830 then
+        updateEventStatus("⚠️ อยู่นอก Lobby (PlaceId: " .. tostring(game.PlaceId) .. ") ข้ามขั้นตอน")
+        return false
+    end
+
+    local playerGui = plr:WaitForChild("PlayerGui", 10)
+    if not playerGui then
+        updateEventStatus("❌ ไม่พบ PlayerGui")
+        return false
+    end
+
+    -- ขั้นตอนที่ 1: กดปุ่ม EventTeleport ใน LeftUI_test
+    updateEventStatus("📍 [1/4] ตรวจสอบปุ่ม EventTeleport...")
+    local leftUI = playerGui:FindFirstChild("LeftUI_test")
+    local eventBtn = leftUI and leftUI:FindFirstChild("Buttons") and leftUI.Buttons:FindFirstChild("EventTeleport")
+
+    if eventBtn then
+        updateEventStatus("👉 [1/4] กดปุ่ม EventTeleport สำเร็จ")
+        if firesignal then
+            firesignal(eventBtn.Activated)
+            pcall(function() firesignal(eventBtn.MouseButton1Click) end)
+        end
+        task.wait(1.5)
+    else
+        updateEventStatus("⚠️ [1/4] ไม่พบปุ่ม LeftUI_test.Buttons.EventTeleport (อาจอยู่ที่โซนแล้ว)")
+    end
+
+    -- ขั้นตอนที่ 2: เดิน / CFrame ไปที่ประตู Event
+    updateEventStatus("🚪 [2/4] เดินทางไปยังประตู _lobbytemplate_event3.Door...")
+    local lobbies = workspace:FindFirstChild("_EVENT_CHALLENGES") and workspace._EVENT_CHALLENGES:FindFirstChild("Lobbies")
+    local lobby3 = lobbies and lobbies:FindFirstChild("_lobbytemplate_event3")
+    local door = lobby3 and lobby3:FindFirstChild("Door")
+
+    local char = plr.Character or plr.CharacterAdded:Wait()
+    local root = char and char:WaitForChild("HumanoidRootPart", 5)
+
+    if not door or not root then
+        updateEventStatus("❌ [2/4] ไม่พบประตู Event หรือ HumanoidRootPart")
+        return false
+    end
+
+    root.CFrame = door.CFrame * CFrame.new(0, 0, 1)
+    task.wait(0.2)
+
+    if firetouchinterest then
+        firetouchinterest(root, door, 0)
+        task.wait(0.1)
+        firetouchinterest(root, door, 1)
+    end
+
+    updateEventStatus("✨ [2/4] สัมผัสประตูเรียบร้อย กำลังรอ MatchmakingPrompt...")
+    task.wait(0.8)
+
+    -- ขั้นตอนที่ 3: รอและกดปุ่ม Find Match
+    local notif = playerGui:FindFirstChild("NotificationWindows")
+    local popups = notif and notif:FindFirstChild("Popups")
+    if not popups then
+        updateEventStatus("❌ ไม่พบ NotificationWindows.Popups")
+        return false
+    end
+
+    local prompt = popups:FindFirstChild("MatchmakingPrompt") or popups:WaitForChild("MatchmakingPrompt", 5)
+    if prompt and prompt:FindFirstChild("Main") and prompt.Main:FindFirstChild("Buttons") then
+        local matchBtn = prompt.Main.Buttons:FindFirstChild("Matchmaking")
+        if matchBtn then
+            updateEventStatus("🔍 [3/4] ตรวจพบปุ่ม 'Find Match' -> กำลังกดค้นหาห้อง...")
+            task.wait(0.3)
+            if firesignal then
+                firesignal(matchBtn.Activated)
+                pcall(function() firesignal(matchBtn.MouseButton1Click) end)
+            end
+        end
+    else
+        updateEventStatus("⚠️ [3/4] ไม่พบหน้าต่าง MatchmakingPrompt (อาจติดคิวอยู่แล้วหรือแก้ Captcha ไปแล้ว)")
+    end
+
+    task.wait(0.8)
+
+    -- ขั้นตอนที่ 4: ตรวจสอบ Captcha และ Auto Fill + Submit
+    local captchaWin = popups:FindFirstChild("CaptchaWindow") or popups:WaitForChild("CaptchaWindow", 3)
+    if captchaWin then
+        updateEventStatus("🧩 [4/4] ตรวจพบหน้าต่าง Captcha! กำลังดึงรหัส...")
+        task.wait(0.2)
+
+        local captchaLabel = captchaWin:FindFirstChild("Captcha")
+        local typeBox = captchaWin:FindFirstChildWhichIsA("TextBox", true)
+        local submitBtn = captchaWin:FindFirstChild("Yes", true) or (captchaWin:FindFirstChild("ButtonHolder") and captchaWin.ButtonHolder:FindFirstChild("Yes"))
+
+        if captchaLabel and typeBox and submitBtn then
+            local code = captchaLabel.Text
+            macro.eventLastCaptcha = tostring(code)
+            updateEventStatus("🔢 [4/4] ถอดรหัส Captcha ได้: '" .. tostring(code) .. "' -> กำลังพิมพ์ลงกล่องข้อความ...")
+
+            typeBox.Text = tostring(code)
+            task.wait(0.25)
+
+            updateEventStatus("📩 [4/4] กำลังกดปุ่ม Submit...")
+            if firesignal then
+                firesignal(submitBtn.Activated)
+                pcall(function() firesignal(submitBtn.MouseButton1Click) end)
+            end
+
+            updateEventStatus("🎉 [4/4] กด Submit เรียบร้อย! รอเซิร์ฟเวอร์ดึงเข้าเกม...")
+            return true
+        else
+            updateEventStatus("❌ [4/4] องค์ประกอบใน CaptchaWindow ไม่ครบ")
+        end
+    else
+        updateEventStatus("⚡ [4/4] ข้าม Captcha (ระบบจดจำสถานะ Captcha เดิม หรือไม่ต้องกรอก)")
+        return true
+    end
+
+    return false
+end
+
+Tabs.Event:AddButton({
+    Title = "⚡ ทดสอบยิงรอบเดียวทันที (Run Once)",
+    Description = "รันขั้นตอนเทเลพอร์ต -> เข้าประตู -> Find Match -> Captcha หนึ่งรอบ",
+    Callback = function()
+        task.spawn(function()
+            updateEventStatus("🚀 กำลังรันแบบ Manual ทันที...")
+            runEventSequence()
+        end)
+    end,
+})
+
+task.spawn(function()
+    while true do
+        if macro.eventAutoPlay then
+            pcall(function()
+                runEventSequence()
+            end)
+            task.wait(macro.eventInterval or 3)
+        else
+            task.wait(1.0)
+        end
+    end
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- ── 12. BATTLEFIELD TAB (Live Game Telemetry) ───────────────
 -- ────────────────────────────────────────────────────────────
 Tabs.Battlefield:AddSection("🌊 LIVE BATTLEFIELD TELEMETRY")
 
@@ -3029,14 +3227,31 @@ task.spawn(function()
     end)
 end)
 
+-- ── Anti-AFK Worker ─────────────────────────────────────────
+pcall(function()
+    local vu = game:GetService("VirtualUser")
+    plr.Idled:Connect(function()
+        vu:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        task.wait(1)
+        vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        print("[AA Macro Anti-AFK] Prevented idle disconnect.")
+    end)
+end)
+
 -- ── Finished Initialization ─────────────────────────────────
-Window:SelectTab(1)
+if isLobby then
+    Window:SelectTab(2) -- Select Event Tab
+else
+    Window:SelectTab(1) -- Select Macro Tab
+end
+
 Fluent:Notify({
-    Title    = "AA Macro Studio v2.0 Ready!",
-    Content  = string.format("💾 โหลดการตั้งค่าแล้ว | AutoStart: %s | AutoReplay: %s | Profile: %s",
-        macro.autoStartOnMatch and "ON" or "OFF",
-        macro.autoReplay and "ON" or "OFF",
-        macro.currentProfileName or "None"
-    ),
+    Title    = "AA Macro Studio v2.0",
+    Content  = isLobby and "🏠 เปิดในโหมด Lobby (April Fool's Event พร้อมใช้งาน)"
+        or string.format("💾 โหมด Combat | AutoStart: %s | AutoReplay: %s | Profile: %s",
+            macro.autoStartOnMatch and "ON" or "OFF",
+            macro.autoReplay and "ON" or "OFF",
+            macro.currentProfileName or "None"
+        ),
     Duration = 5,
 })

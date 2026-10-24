@@ -6,7 +6,16 @@
 -- ── Check Lobby Guard ────────────────────────────────────────
 local LOBBY_PLACE_ID = 8304191830
 if game.PlaceId == LOBBY_PLACE_ID then
-    warn("[AA Macro] ⚠️ ปฏิเสธการรัน: อยู่ใน Lobby (PlaceId: 8304191830) สคริปต์นี้สำหรับแมพต่อสู้เท่านั้นเพื่อความปลอดภัย")
+    print("[AA Macro] 🏠 ตรวจพบว่าอยู่ใน Lobby (PlaceId: 8304191830)")
+    print("[AA Macro] 🎪 กำลังสลับไปรันระบบ Event & Lobby Automation...")
+    if isfile and isfile("AA_Macro/lobby_event.lua") then
+        return loadstring(readfile("AA_Macro/lobby_event.lua"))()
+    end
+    local localPath = "c:/Users/PC/Documents/roblox/AA_Macro/lobby_event.lua"
+    if isfile and isfile(localPath) then
+        return loadstring(readfile(localPath))()
+    end
+    warn("[AA Macro] ⚠️ สคริปต์นี้สำหรับแมพต่อสู้ และไม่พบ lobby_event.lua")
     return
 end
 
