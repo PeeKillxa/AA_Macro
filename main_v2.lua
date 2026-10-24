@@ -2540,7 +2540,16 @@ local EventToggle = Tabs.Event:AddToggle("AutoPlayEventToggle", {
 EventToggle:OnChanged(function()
     macro.eventAutoPlay = Fluent.Options.AutoPlayEventToggle.Value
     if macro.eventAutoPlay then
-        updateEventStatus("🟢 เริ่มต้นทำงาน Auto Play April Fool's Event")
+        if isLobby then
+            updateEventStatus("🟢 เริ่มต้นทำงาน Auto Play April Fool's Event")
+        else
+            updateEventStatus("⏸️ เปิดระบบไว้แล้ว แต่คุณอยู่ในห้องต่อสู้ (จะเริ่มทำงานอัตโนมัติเมื่อกลับสู่ Lobby)")
+            Fluent:Notify({
+                Title    = "April Fool's Event",
+                Content  = "⏸️ อยู่ในห้องต่อสู้ ระบบจะรอทำงานเมื่อกลับสู่ Lobby อัตโนมัติ",
+                Duration = 3.5,
+            })
+        end
     else
         updateEventStatus("⏹️ หยุดการทำงาน Auto Play")
     end
@@ -2558,12 +2567,11 @@ Tabs.Event:AddSlider("EventIntervalSlider", {
 })
 
 local function runEventSequence()
-    macro.eventAttempts = macro.eventAttempts + 1
-
-    if game.PlaceId ~= 8304191830 then
-        updateEventStatus("⚠️ อยู่นอก Lobby (PlaceId: " .. tostring(game.PlaceId) .. ") ข้ามขั้นตอน")
+    if not isLobby then
         return false
     end
+
+    macro.eventAttempts = macro.eventAttempts + 1
 
     local playerGui = plr:WaitForChild("PlayerGui", 10)
     if not playerGui then
@@ -2711,8 +2719,16 @@ end
 
 Tabs.Event:AddButton({
     Title = "⚡ ทดสอบยิงรอบเดียวทันที (Run Once)",
-    Description = "รันขั้นตอนเทเลพอร์ต -> เข้าประตู -> Find Match -> Captcha หนึ่งรอบ",
+    Description = "รันขั้นตอนเทเลพอร์ต -> เข้าประตู -> Find Match -> Captcha หนึ่งรอบ (เฉพาะใน Lobby)",
     Callback = function()
+        if not isLobby then
+            Fluent:Notify({
+                Title   = "April Fool's Event",
+                Content = "⚠️ ฟังก์ชันนี้ทำงานได้เฉพาะใน Lobby เท่านั้น!",
+                Duration = 3,
+            })
+            return
+        end
         task.spawn(function()
             updateEventStatus("🚀 กำลังรันแบบ Manual ทันที...")
             runEventSequence()
@@ -2722,13 +2738,13 @@ Tabs.Event:AddButton({
 
 task.spawn(function()
     while true do
-        if macro.eventAutoPlay then
+        if isLobby and macro.eventAutoPlay then
             pcall(function()
                 runEventSequence()
             end)
             task.wait(macro.eventInterval or 3)
         else
-            task.wait(1.0)
+            task.wait(1.5)
         end
     end
 end)
