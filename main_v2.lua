@@ -2084,6 +2084,7 @@ local Tabs = {
     Debug       = Window:AddTab({ Title = "Debug",       Icon = "search" }),
     Settings    = Window:AddTab({ Title = "Settings",    Icon = "settings" }),
 }
+macro.Tabs = Tabs
 
 -- ────────────────────────────────────────────────────────────
 -- ── 10. MACRO TAB (Merged: Dashboard + Controls + Profiles) ─
@@ -3625,18 +3626,18 @@ end)
 
 -- ── Finished Initialization ─────────────────────────────────
 if isLobby then
-    Window:SelectTab(2) -- Select Event Tab
+    pcall(function() Tabs.Event:Select() end)
 else
-    Window:SelectTab(1) -- Select Macro Tab
+    pcall(function() Tabs.Macro:Select() end)
 end
 
 Fluent:Notify({
     Title    = "AA Macro Studio v2.0",
-    Content  = isLobby and "🏠 เปิดในโหมด Lobby (April Fool's Event พร้อมใช้งาน)"
-        or string.format("💾 โหมด Combat | AutoStart: %s | AutoReplay: %s | Profile: %s",
-            macro.autoStartOnMatch and "ON" or "OFF",
-            macro.autoReplay and "ON" or "OFF",
-            macro.currentProfileName or "None"
+    Content  = isLobby and "🏠 โหมด Lobby (April Fool's Event พร้อมใช้งาน)"
+        or string.format("💾 โหมด Combat | AutoVote: %s | AutoPlay: %s | AIAutoplay: %s",
+            macro.autoVoteStart and "ON" or "OFF",
+            macro.autoPlayMacroOnMatch and "ON" or "OFF",
+            macro.aiAutoplay and "ON" or "OFF"
         ),
     Duration = 5,
 })
