@@ -2805,29 +2805,31 @@ function macro.GetEquippedUnits()
             local m = wm and wm:GetChildren()[1]
             local modelName = m and m.Name or nil
 
-            if modelName then
-                local unitId = modelName:gsub("_unit$", "")
-                local data = allUnitsData and (allUnitsData[unitId] or allUnitsData[modelName])
-
-                local costFrame = ch:FindFirstChild("Cost")
-                local costText = costFrame and costFrame:FindFirstChild("text") and costFrame.text.Text
-                local cost = tonumber((tostring(costText):gsub("[^%d]", ""))) or (data and data.cost or 0)
-
-                -- ตรวจสอบคุณสมบัติ hill_unit (ถ้าเป็น true คือตัววางบนอาคาร/สิ่งก่อสร้าง/Hill)
-                local isHill = (data and data.hill_unit == true) or false
+            if modelName and modelName ~= "unselected_unit" then
                 local uuid = ch:GetAttribute("_equipped_frame_unit_uuid")
+                if uuid and uuid ~= "" then
+                    local unitId = modelName:gsub("_unit$", "")
+                    local data = allUnitsData and (allUnitsData[unitId] or allUnitsData[modelName])
 
-                table.insert(units, {
-                    slot          = ch.Name,
-                    slotNum       = tonumber(ch.Name) or 99,
-                    uuid          = uuid,
-                    unitId        = unitId,
-                    modelName     = modelName,
-                    displayName   = data and data.name or modelName,
-                    cost          = cost,
-                    isHill        = isHill,
-                    placementType = isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (วางพื้น)",
-                })
+                    local costFrame = ch:FindFirstChild("Cost")
+                    local costText = costFrame and costFrame:FindFirstChild("text") and costFrame.text.Text
+                    local cost = tonumber((tostring(costText):gsub("[^%d]", ""))) or (data and data.cost or 0)
+
+                    -- ตรวจสอบคุณสมบัติ hill_unit (ถ้าเป็น true คือตัววางบนอาคาร/สิ่งก่อสร้าง/Hill)
+                    local isHill = (data and data.hill_unit == true) or false
+
+                    table.insert(units, {
+                        slot          = ch.Name,
+                        slotNum       = tonumber(ch.Name) or 99,
+                        uuid          = uuid,
+                        unitId        = unitId,
+                        modelName     = modelName,
+                        displayName   = data and data.name or modelName,
+                        cost          = cost,
+                        isHill        = isHill,
+                        placementType = isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (วางพื้น)",
+                    })
+                end
             end
         end
     end
