@@ -446,6 +446,8 @@ _G.AAMacro = {
     eventStatusText        = "⏹️ STANDBY — รอคำสั่ง",
     aiAutoplay             = false,
     aiAutoUpgrade          = true,
+    autoDeleteRefund       = true,
+    failedUnitPlacements   = {},
     aiMaxUnits             = 20,
     aiInterval             = 1.0,
     aiStatusText           = "AI Standby",
@@ -1150,6 +1152,7 @@ function macro.SaveSettings()
             autoPlayMacroOnMatch   = macro.autoPlayMacroOnMatch,
             aiAutoplay             = macro.aiAutoplay,
             aiAutoUpgrade          = macro.aiAutoUpgrade,
+            autoDeleteRefund       = macro.autoDeleteRefund,
             aiMaxUnits             = macro.aiMaxUnits or 20,
             autoReplay             = macro.autoReplay,
             playMode               = macro.playMode,
@@ -1176,6 +1179,7 @@ function macro.LoadSettings()
                 if data.autoPlayMacroOnMatch ~= nil then macro.autoPlayMacroOnMatch = data.autoPlayMacroOnMatch end
                 if data.aiAutoplay ~= nil then macro.aiAutoplay = data.aiAutoplay end
                 if data.aiAutoUpgrade ~= nil then macro.aiAutoUpgrade = data.aiAutoUpgrade end
+                if data.autoDeleteRefund ~= nil then macro.autoDeleteRefund = data.autoDeleteRefund end
                 if data.aiMaxUnits ~= nil then macro.aiMaxUnits = tonumber(data.aiMaxUnits) or 20 end
                 if data.autoStartOnMatch ~= nil then macro.autoStartOnMatch = data.autoStartOnMatch end
                 if data.autoReplay ~= nil then macro.autoReplay = data.autoReplay end
@@ -2945,8 +2949,72 @@ function macro.GetAvailableSpot(isHill)
     return nil, nil, nil
 end
 
+macro.failedUnitPlacements = macro.failedUnitPlacements or {}
+
+function macro.HandleRefundSpells()
+    if isLobby or not unitsFrame or not macro.autoDeleteRefund then return 0 end
+    local deletedCount = 0
+
+    for _, ch in ipairs(unitsFrame:GetChildren()) do
+        if ch:IsA("ImageButton") then
+            local sn = ch:FindFirstChild("SpellName")
+            local del = ch:FindFirstChild("Delete")
+            local spellTitle = sn and sn.Text or ""
+            local isRefund = spellTitle:lower():find("refund")
+
+            if not isRefund and ch.Name == "GameSpellFrame" then
+                local descLabel = ch:FindFirstChild("DescriptionFrame", true)
+                if descLabel and descLabel:IsA("TextLabel") and descLabel.Text:lower():find("refund") then
+                    isRefund = true
+                end
+            end
+
+            if isRefund and del and del.Visible then
+                local deleted = false
+                if firesignal then
+                    local ok = pcall(function()
+                        firesignal(del.Activated)
+                        pcall(function() firesignal(del.MouseButton1Click) end)
+                    end)
+                    if ok then deleted = true end
+                end
+
+                if not deleted then
+                    local endpoints = RS:FindFirstChild("endpoints") and RS.endpoints:FindFirstChild("client_to_server")
+                    local deleteRemote = endpoints and endpoints:FindFirstChild("delete_ingame_spell")
+                    if deleteRemote then
+                        pcall(function()
+                            deleteRemote:InvokeServer(tostring(ch.Name))
+                        end)
+                        deleted = true
+                    end
+                end
+
+                if deleted then
+                    deletedCount = deletedCount + 1
+                end
+            end
+        end
+    end
+
+    if deletedCount > 0 then
+        Fluent:Notify({
+            Title    = "🗑️ Auto Refund Deleted",
+            Content  = string.format("กดปุ่มกากบาท (X) ลบบัพ Refund ออก %d ช่องเรียบร้อย!", deletedCount),
+            Duration = 2.5,
+        })
+    end
+
+    return deletedCount
+end
+
 function macro.RunAIPlacementStep()
     if isLobby or not spawnRemote then return false end
+
+    -- ลบบัพ Refund ออกอัตโนมัติก่อนวาง
+    if macro.autoDeleteRefund then
+        pcall(function() macro.HandleRefundSpells() end)
+    end
 
     local currentActive = getActiveUnitsCount()
     local maxLimit = tonumber(macro.aiMaxUnits) or 20
@@ -2962,21 +3030,42 @@ function macro.RunAIPlacementStep()
         return false
     end
 
-    -- หายูนิตที่เงินพอ
+    -- หายูนิตที่เงินพอ และยังไม่เคยเฟลครบ 3 ครั้ง (ถ้าตัวไหนวางไม่ได้ครบ 3 ครั้ง ให้ข้ามไปตัวต่อไปทันที)
     local affordableUnit = nil
     for _, u in ipairs(units) do
-        local uCost = tonumber(u.cost) or 0
-        if gold >= uCost and u.uuid then
-            affordableUnit = u
-            break
+        local failCount = macro.failedUnitPlacements[u.uuid] or 0
+        if failCount < 3 then
+            local uCost = tonumber(u.cost) or 0
+            if gold >= uCost and u.uuid then
+                affordableUnit = u
+                break
+            end
         end
     end
 
     if not affordableUnit then
+        -- ตรวจสอบว่ามียูนิตที่ถูกข้ามเพราะเฟลครบ 3 ครั้งหรือไม่
+        local allSkipped = true
+        for _, u in ipairs(units) do
+            local failCount = macro.failedUnitPlacements[u.uuid] or 0
+            if failCount < 3 then
+                allSkipped = false
+                break
+            end
+        end
+
+        if allSkipped and #units > 0 then
+            macro.aiStatusText = "⏭️ ยูนิตในมือวางไม่ผ่านครบ 3 ครั้งทุกตัว (ข้ามไปรอเงิน/บัพ)"
+            return false
+        end
+
         local minCost = 999999
         for _, u in ipairs(units) do
-            local uc = tonumber(u.cost) or 0
-            if uc > 0 and uc < minCost then minCost = uc end
+            local failCount = macro.failedUnitPlacements[u.uuid] or 0
+            if failCount < 3 then
+                local uc = tonumber(u.cost) or 0
+                if uc > 0 and uc < minCost then minCost = uc end
+            end
         end
         macro.aiStatusText = string.format("⏳ รอเงิน... (มี %d ¥ │ ขั้นต่ำ %d ¥)", gold, minCost ~= 999999 and minCost or 0)
         return false
@@ -2985,12 +3074,24 @@ function macro.RunAIPlacementStep()
     -- ค้นหาพิกัดตามประเภท Ground หรือ Hill โดยเน้นบริเวณที่มีมอนสเตอร์
     local spotCF, spotPart, mobDist = macro.GetAvailableSpot(affordableUnit.isHill)
     if not spotCF then
-        macro.aiStatusText = string.format("⚠️ ไม่พบจุดว่างสำหรับประเภท %s", affordableUnit.isHill and "HILL (บนสิ่งก่อสร้าง)" or "GROUND (พื้น)")
+        macro.failedUnitPlacements[affordableUnit.uuid] = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
+        local currentFails = macro.failedUnitPlacements[affordableUnit.uuid]
+        if currentFails >= 3 then
+            macro.aiStatusText = string.format("⏭️ ไม่พบจุดวาง %s ครบ 3 ครั้ง ➔ ข้ามไปตัวถัดไป", affordableUnit.displayName)
+            Fluent:Notify({
+                Title    = "⚠️ Skip Unit (3/3 Fails)",
+                Content  = string.format("ไม่พบจุดวาง %s ครบ 3 ครั้ง\nข้ามไปวางตัวละครตัวถัดไปในมือทันที!", affordableUnit.displayName),
+                Duration = 3,
+            })
+        else
+            macro.aiStatusText = string.format("⚠️ ไม่พบจุดว่างสำหรับ %s (%d/3 ครั้ง)", affordableUnit.displayName, currentFails)
+        end
         return false
     end
 
     local mobInfoStr = (mobDist and mobDist < 900) and string.format(" (ใกล้ศัตรู %.0f studs)", mobDist) or " (ดักหน้าเส้นทาง)"
-    macro.aiStatusText = string.format("🚀 วาง %s [%s]%s บน %s", affordableUnit.displayName, affordableUnit.isHill and "HILL" or "GROUND", mobInfoStr, spotPart and spotPart.Name or "Spot")
+    local currentAttempt = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
+    macro.aiStatusText = string.format("🚀 วาง %s [%s]%s บน %s (ครั้งที่ %d/3)", affordableUnit.displayName, affordableUnit.isHill and "HILL" or "GROUND", mobInfoStr, spotPart and spotPart.Name or "Spot", currentAttempt)
 
     local okInvoke, resInvoke = pcall(function()
         return spawnRemote:InvokeServer(affordableUnit.uuid, spotCF)
@@ -3006,6 +3107,8 @@ function macro.RunAIPlacementStep()
     end
 
     if confirmedUnit or (getActiveUnitsCount() > currentActive) then
+        -- วางสำเร็จ ล้างประวัติเฟลของตัวนี้ทิ้ง
+        macro.failedUnitPlacements[affordableUnit.uuid] = nil
         Fluent:Notify({
             Title    = "🤖 AI Placed Unit",
             Content  = string.format("วาง %s (%s)\nตำแหน่ง: %s%s\nค่าตัว: %d ¥",
@@ -3018,13 +3121,28 @@ function macro.RunAIPlacementStep()
         })
         return true
     else
-        -- ถ้าเซิร์ฟเวอร์ปฏิเสธหรือไม่เกิด ให้ blacklist จุดนี้ไว้ 25 วินาที แล้ว AI จะเปลี่ยนจุดใหม่ทันทีในรอบถัดไป
+        -- ถ้าเซิร์ฟเวอร์ปฏิเสธหรือไม่เกิด นับจำนวนครั้งที่เฟล
+        macro.failedUnitPlacements[affordableUnit.uuid] = (macro.failedUnitPlacements[affordableUnit.uuid] or 0) + 1
+        local fails = macro.failedUnitPlacements[affordableUnit.uuid]
+
+        -- blacklist จุดนี้ไว้ 25 วินาที แล้ว AI จะเปลี่ยนจุดใหม่ทันทีในรอบถัดไป
         macro.blacklistedSpots = macro.blacklistedSpots or {}
         table.insert(macro.blacklistedSpots, {
             pos = spotCF.Position,
             expires = tick() + 25
         })
-        macro.aiStatusText = string.format("⚠️ จุดบน %s ไม่ผ่าน กำลังเปลี่ยนหาจุดใหม่รอบมอน...", spotPart and spotPart.Name or "Spot")
+
+        if fails >= 3 then
+            macro.aiStatusText = string.format("⏭️ ข้าม %s (วางไม่ผ่าน 3 ครั้ง ➔ ข้ามไปตัวถัดไป)", affordableUnit.displayName)
+            Fluent:Notify({
+                Title    = "⚠️ Skip Unit (3/3 Fails)",
+                Content  = string.format("วาง %s ไม่ผ่านครบ 3 ครั้ง!\nระบบข้ามไปวางยูนิตตัวถัดไปในมือทันที", affordableUnit.displayName),
+                Duration = 3.5,
+            })
+        else
+            macro.aiStatusText = string.format("⚠️ วาง %s ไม่ผ่าน (%d/3 ครั้ง) กำลังลองจุดใหม่...", affordableUnit.displayName, fails)
+        end
+
         return false
     end
 end
@@ -3269,18 +3387,53 @@ Tabs.Event:AddButton({
     end,
 })
 
+local AutoDeleteRefundToggle = Tabs.Event:AddToggle("AutoDeleteRefundToggle", {
+    Title       = "ลบบัพ Refund อัตโนมัติ (Auto Delete Refund Spells)",
+    Description = "เมื่อได้รับบัพ Refund จะกดปุ่มกากบาท (X) ลบทิ้งทันที เพื่อเปิดทางให้บัพอื่น",
+    Default     = macro.autoDeleteRefund ~= false,
+})
+
+AutoDeleteRefundToggle:OnChanged(function()
+    macro.autoDeleteRefund = Fluent.Options.AutoDeleteRefundToggle.Value
+    macro.SaveSettings()
+    updateAIStatus()
+    Fluent:Notify({
+        Title   = "Auto Delete Refund",
+        Content = macro.autoDeleteRefund and "🟢 เปิดใช้งานลบบัพ Refund อัตโนมัติ" or "🔴 ปิดใช้งานลบบัพ Refund",
+        Duration = 3,
+    })
+end)
+
+Tabs.Event:AddButton({
+    Title       = "🗑️ กดกากบาทลบบัพ Refund ทันที (Delete Refund Spells)",
+    Description = "สแกนหาการ์ดบัพ Refund ในช่องแล้วกดปุ่มกากบาท (X) ลบทิ้งทันที",
+    Callback    = function()
+        local count = macro.HandleRefundSpells()
+        if count == 0 then
+            Fluent:Notify({ Title = "Delete Refund", Content = "ไม่พบบัพ Refund ในช่อง", Duration = 2.5 })
+        end
+    end,
+})
+
 -- AI Background Worker Loop
 task.spawn(function()
     while true do
-        if not isLobby and (macro.aiAutoplay or macro.aiAutoUpgrade) then
+        if not isLobby then
             pcall(function()
-                if macro.aiAutoplay then
-                    macro.RunAIPlacementStep()
+                -- ลบบัพ Refund ออกอัตโนมัติถ้าเปิดใช้งาน
+                if macro.autoDeleteRefund then
+                    macro.HandleRefundSpells()
                 end
-                if macro.aiAutoUpgrade then
-                    macro.RunAIUpgradeStep()
+
+                if macro.aiAutoplay or macro.aiAutoUpgrade then
+                    if macro.aiAutoplay then
+                        macro.RunAIPlacementStep()
+                    end
+                    if macro.aiAutoUpgrade then
+                        macro.RunAIUpgradeStep()
+                    end
+                    updateAIStatus()
                 end
-                updateAIStatus()
             end)
             task.wait(macro.aiInterval or 1.0)
         else
