@@ -2537,30 +2537,64 @@ local function runEventSequence()
         updateEventStatus("⚠️ [1/4] ไม่พบปุ่ม LeftUI_test.Buttons.EventTeleport (อาจอยู่ที่โซนแล้ว)")
     end
 
-    -- ขั้นตอนที่ 2: เดิน / CFrame ไปที่ประตู Event
-    updateEventStatus("🚪 [2/4] เดินทางไปยังประตู _lobbytemplate_event3.Door...")
+    -- ขั้นตอนที่ 2: เดินไปที่ประตู Event ด้วย WalkTo (ไม่ใช้วาร์ป CFrame เพื่อความปลอดภัย)
+    updateEventStatus("🚶 [2/4] กำลังเดินไปยังประตู _lobbytemplate_event3.Door (WalkTo)...")
     local lobbies = workspace:FindFirstChild("_EVENT_CHALLENGES") and workspace._EVENT_CHALLENGES:FindFirstChild("Lobbies")
     local lobby3 = lobbies and lobbies:FindFirstChild("_lobbytemplate_event3")
     local door = lobby3 and lobby3:FindFirstChild("Door")
 
     local char = plr.Character or plr.CharacterAdded:Wait()
     local root = char and char:WaitForChild("HumanoidRootPart", 5)
+    local hum  = char and (char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5))
 
-    if not door or not root then
-        updateEventStatus("❌ [2/4] ไม่พบประตู Event หรือ HumanoidRootPart")
+    if not door or not root or not hum then
+        updateEventStatus("❌ [2/4] ไม่พบประตู Event หรือ Humanoid")
         return false
     end
 
-    root.CFrame = door.CFrame * CFrame.new(0, 0, 1)
-    task.wait(0.2)
+    -- พิกัดเป้าหมาย ปรับระดับ Y ให้ตรงกับเท้าผู้เล่นเพื่อไม่ให้วิ่งสะดุด
+    local targetPos = Vector3.new(door.Position.X, root.Position.Y, door.Position.Z)
+    local walkStart = tick()
+    local walkTimeout = 25
 
-    if firetouchinterest then
+    while (tick() - walkStart) < walkTimeout do
+        if not root or not hum or not door then break end
+
+        -- คำนวณระยะห่างระนาบ XZ
+        local distXZ = Vector2.new(root.Position.X - door.Position.X, root.Position.Z - door.Position.Z).Magnitude
+
+        -- ตรวจสอบว่าหน้าต่าง MatchmakingPrompt เด้งขึ้นมาแล้วหรือยัง
+        local notif = playerGui:FindFirstChild("NotificationWindows")
+        local popups = notif and notif:FindFirstChild("Popups")
+        if popups and popups:FindFirstChild("MatchmakingPrompt") then
+            updateEventStatus("🎯 [2/4] ตรวจพบหน้าต่าง MatchmakingPrompt แล้ว! หยุดเดิน")
+            break
+        end
+
+        -- ถ้าเดินมาชนหรือชิดประตูแล้ว (ระยะ <= 3.5 studs)
+        if distXZ <= 3.5 then
+            updateEventStatus("🚪 [2/4] เดินถึงประตูแล้ว สัมผัสประตู...")
+            if firetouchinterest then
+                firetouchinterest(root, door, 0)
+                task.wait(0.05)
+                firetouchinterest(root, door, 1)
+            end
+            break
+        end
+
+        -- สั่งให้ Humanoid เดินไปยังตำแหน่งเป้าหมาย
+        hum:MoveTo(targetPos)
+        task.wait(0.15)
+    end
+
+    -- สัมผัสประตูซ้ำเพื่อความชัวร์ 100% ว่าเซิร์ฟเวอร์ตอบรับ
+    if firetouchinterest and root and door then
         firetouchinterest(root, door, 0)
-        task.wait(0.1)
+        task.wait(0.05)
         firetouchinterest(root, door, 1)
     end
 
-    updateEventStatus("✨ [2/4] สัมผัสประตูเรียบร้อย กำลังรอ MatchmakingPrompt...")
+    updateEventStatus("✨ [2/4] เข้าถึงประตูเรียบร้อย กำลังรอ MatchmakingPrompt...")
     task.wait(0.8)
 
     -- ขั้นตอนที่ 3: รอและกดปุ่ม Find Match
