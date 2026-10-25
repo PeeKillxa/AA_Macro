@@ -10,6 +10,8 @@ local Players = game:GetService("Players")
 local Stats = game:GetService("Stats")
 local MarketplaceService = game:GetService("MarketplaceService")
 local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local GuiService = game:GetService("GuiService")
 
 local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
@@ -23,10 +25,34 @@ end
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
 -- ============================================================
+-- 🛡️ BULLETPROOF ANTI-AFK ENGINE (ป้องกันการโดนเตะ AFK 20 นาที 100%)
+-- ============================================================
+pcall(function()
+    player.Idled:Connect(function()
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end)
+end)
+
+-- ส่งคลิกเสมือนทุกๆ 3 นาทีเพื่อรีเซ็ต Idle Timer ต่อเนื่อง
+task.spawn(function()
+    while task.wait(180) do
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end
+end)
+
+-- ============================================================
 -- ⏱️ PERSISTENT BOT SESSION & WATCHDOG HEARTBEAT ENGINE
 -- ============================================================
 local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId))
 local heartbeatFile = "watchdog_heartbeat.txt"
+local isKickedOrDisconnected = false
+local disconnectReason = ""
 
 -- อ่านข้อมูล Session เดิมจากเครื่อง (ถ้ามี)
 -- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 10 นาที (600 วิ)
@@ -50,9 +76,57 @@ if isFileSystemSupported then
     end)
 end
 
+-- ฟังก์ชันแจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python รู้ทันที
+local function onDisconnectDetected(reason)
+    if isKickedOrDisconnected then return end
+    isKickedOrDisconnected = true
+    disconnectReason = reason or "Roblox Disconnected / Kicked"
+    warn("[AntiAFK/Watchdog] 🚨 DISCONNECT DETECTED: " .. tostring(disconnectReason))
+
+    pcall(function()
+        -- 1. ลบ Heartbeat file ทิ้งทันที! เพื่อให้ Watchdog รู้ว่าสคริปต์หยุด
+        if delfile and isfile and isfile(heartbeatFile) then
+            delfile(heartbeatFile)
+        end
+        -- 2. เขียนไฟล์แจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python อ่านและสั่งรีจอทันที
+        if writefile then
+            writefile("watchdog_disconnected.txt", tostring(disconnectReason))
+        end
+    end)
+end
+
+-- ดักจับเมื่อมี Error / Kick modal จาก GuiService
+pcall(function()
+    GuiService.ErrorMessageChanged:Connect(function(msg)
+        if msg and #msg > 0 then
+            onDisconnectDetected("GuiService: " .. msg)
+        end
+    end)
+end)
+
+-- ดักจับหน้าต่าง Popup เตือนหลุดทุกประเภทใน CoreGui (รวมถึง AFK 20 นาที)
+pcall(function()
+    local CoreGui = game:GetService("CoreGui")
+    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
+    if promptGui then
+        local overlay = promptGui:FindFirstChild("promptOverlay")
+        if overlay then
+            overlay.DescendantAdded:Connect(function(desc)
+                if desc:IsA("TextLabel") or desc:IsA("TextBox") then
+                    task.wait(0.2)
+                    local txt = desc.Text:lower()
+                    if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
+                        onDisconnectDetected("PromptModal: " .. desc.Text)
+                    end
+                end
+            end)
+        end
+    end
+end)
+
 -- ฟังก์ชันอัปเดต Heartbeat สื่อสารกับ Watchdog CMD และบันทึก Session
 local function pulseHeartbeat()
-    if not isFileSystemSupported then return end
+    if not isFileSystemSupported or isKickedOrDisconnected then return end
     pcall(function()
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android
         writefile(heartbeatFile, tostring(os.time()))
@@ -71,7 +145,9 @@ pulseHeartbeat()
 -- ส่ง Heartbeat สม่ำเสมอทุกๆ 5 วินาทีใน background thread
 task.spawn(function()
     while task.wait(5) do
-        pulseHeartbeat()
+        if not isKickedOrDisconnected then
+            pulseHeartbeat()
+        end
     end
 end)
 
@@ -324,7 +400,7 @@ local function sendTelemetry(customStatus)
         game_name = gameName,
         place_id = game.PlaceId,
         job_id = (game.JobId ~= "" and game.JobId) or "private-server",
-        status = customStatus or "ONLINE",
+        status = isKickedOrDisconnected and "OFFLINE" or (customStatus or "ONLINE"),
         level = gameStats.level,
         gems = gameStats.gems,
         gold = gameStats.gold,
