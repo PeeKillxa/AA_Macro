@@ -90,17 +90,20 @@ local function onDisconnectDetected(reason)
         end
         -- 2. เขียนไฟล์แจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python อ่านและสั่งรีจอทันที
         if writefile then
-            writefile("watchdog_disconnected.txt", tostring(disconnectReason))
+            writefile("watchdog_disconnected.txt", tostring(disconnectReason) .. "\n")
         end
     end)
 end
 
--- ดักจับเมื่อมี Error / Kick modal จาก GuiService
+-- ดักจับเมื่อมี Error / Kick modal จาก GuiService (กรองเฉพาะ Disconnect จริง ไม่นับ Teleport / Replay)
 pcall(function()
     GuiService.ErrorMessageChanged:Connect(function(msg)
-        if msg and #msg > 0 then
-            onDisconnectDetected("GuiService: " .. msg)
-        end
+        pcall(function()
+            local code = GuiService:GetErrorCode().Value
+            if code >= Enum.ConnectionError.DisconnectErrors.Value then
+                onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", code, tostring(msg)))
+            end
+        end)
     end)
 end)
 
@@ -111,12 +114,26 @@ pcall(function()
     if promptGui then
         local overlay = promptGui:FindFirstChild("promptOverlay")
         if overlay then
+            -- ตรวจสอบข้อความที่มีอยู่แล้วตอนสคริปต์โหลด
+            for _, desc in ipairs(overlay:GetDescendants()) do
+                if desc:IsA("TextLabel") or desc:IsA("TextBox") then
+                    local txt = desc.Text:lower()
+                    if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
+                        if not txt:find("teleport") and not txt:find("joining") then
+                            onDisconnectDetected("PromptModal: " .. desc.Text)
+                        end
+                    end
+                end
+            end
+            -- ดักจับข้อความใหม่ที่โผล่ขึ้นมาภายหลัง
             overlay.DescendantAdded:Connect(function(desc)
                 if desc:IsA("TextLabel") or desc:IsA("TextBox") then
                     task.wait(0.2)
                     local txt = desc.Text:lower()
                     if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
-                        onDisconnectDetected("PromptModal: " .. desc.Text)
+                        if not txt:find("teleport") and not txt:find("joining") then
+                            onDisconnectDetected("PromptModal: " .. desc.Text)
+                        end
                     end
                 end
             end)
@@ -129,13 +146,13 @@ local function pulseHeartbeat()
     if not isFileSystemSupported or isKickedOrDisconnected then return end
     pcall(function()
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android
-        writefile(heartbeatFile, tostring(os.time()))
+        writefile(heartbeatFile, tostring(os.time()) .. "\n")
         -- 2. บันทึก Session Uptime สะสม ไม่ให้เวลารีตอน Replay / Server Hop
         writefile(sessionFile, HttpService:JSONEncode({
             user_id = player.UserId,
             session_start = sessionStartTime,
             last_seen = os.time()
-        }))
+        }) .. "\n")
     end)
 end
 
