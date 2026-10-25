@@ -29,7 +29,7 @@ local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId)
 local heartbeatFile = "watchdog_heartbeat.txt"
 
 -- อ่านข้อมูล Session เดิมจากเครื่อง (ถ้ามี)
--- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 5 นาที (300 วิ)
+-- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 10 นาที (600 วิ)
 -- จะนับเวลา Uptime ต่อเนื่องจาก Session เดิมทันที ไม่รีเซ็ตเป็น 0!
 local sessionStartTime = os.time()
 local isFileSystemSupported = (writefile and readfile and isfile) and true or false
@@ -41,8 +41,8 @@ if isFileSystemSupported then
             local data = HttpService:JSONDecode(content)
             if data and data.session_start and data.last_seen then
                 local timeSinceLast = os.time() - data.last_seen
-                -- ถ้าห่างจากรอบล่าสุดไม่เกิน 300 วินาที (5 นาที) ให้นับ Uptime ต่อเนื่อง
-                if timeSinceLast >= 0 and timeSinceLast < 300 then
+                -- ถ้าห่างจากรอบล่าสุดไม่เกิน 600 วินาที (10 นาที) ให้นับ Uptime ต่อเนื่อง
+                if timeSinceLast >= 0 and timeSinceLast < 600 then
                     sessionStartTime = data.session_start
                 end
             end
