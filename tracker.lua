@@ -1,9 +1,18 @@
 -- ============================================================
--- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.1)
+-- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.3)
 -- Optimized for: Anime Adventures (Lobby + Story/Match) & All Games
--- Author: cook45 for clack (Tuned for nexuse-website.vercel.app)
+-- Author: cook45 for clack (Tuned for nexuse-website.vercel.app & Rokid Watchdog v3.0)
 -- วางสคริปต์นี้ใน Auto-Execute ของ Executor ทุกจอ
 -- ============================================================
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- ป้องกันการรันซ้ำซ้อนในแมพเดิม (ถ้ามีสคริปต์เรียกซ้ำ จะยกเลิกลูปเก่าอัตโนมัติ)
+local env = (getgenv and getgenv()) or _G
+local CURRENT_RUN_ID = tostring(os.clock()) .. "_" .. tostring(math.random(100000, 999999))
+env._COOK45_TRACKER_RUN_ID = CURRENT_RUN_ID
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
@@ -51,8 +60,32 @@ end)
 -- ============================================================
 local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId))
 local heartbeatFile = "watchdog_heartbeat.txt"
+local rokidCheckFile = string.format("executor_check_%s.txt", tostring(player.Name))
 local isKickedOrDisconnected = false
 local disconnectReason = ""
+
+-- ล้างไฟล์แจ้งเตือนหลุดค้างเก่าทันทีเมื่อสคริปต์โหลดเข้าแมพสำเร็จ
+pcall(function()
+    if delfile and isfile and isfile("watchdog_disconnected.txt") then
+        delfile("watchdog_disconnected.txt")
+    end
+end)
+
+-- ดักจับการวาร์ปย้ายแมพ (Lobby <-> Match / Replay) เพื่อส่งสัญญาณให้ Watchdog ขยายเวลาโหลด
+pcall(function()
+    player.OnTeleport:Connect(function(teleportState)
+        pcall(function()
+            if writefile then
+                local nowStr = tostring(os.time()) .. "\n"
+                writefile(heartbeatFile, nowStr)
+                writefile(rokidCheckFile, "working:" .. tostring(os.time()))
+            end
+            if delfile and isfile and isfile("watchdog_disconnected.txt") then
+                delfile("watchdog_disconnected.txt")
+            end
+        end)
+    end)
+end)
 
 -- อ่านข้อมูล Session เดิมจากเครื่อง (ถ้ามี)
 -- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 10 นาที (600 วิ)
@@ -95,11 +128,16 @@ local function onDisconnectDetected(reason)
     end)
 end
 
--- ดักจับเมื่อมี Error / Kick modal จาก GuiService (กรองเฉพาะ Disconnect จริง ไม่นับ Teleport / Replay)
+-- ดักจับเมื่อมี Error / Kick modal จาก GuiService (กรองเฉพาะ Disconnect จริง ไม่นับ Teleport / Replay Code 285)
 pcall(function()
     GuiService.ErrorMessageChanged:Connect(function(msg)
         pcall(function()
             local code = GuiService:GetErrorCode().Value
+            local lowerMsg = tostring(msg or ""):lower()
+            -- ข้าม Code 285 (DisconnectClientInitiated) และการวาร์ปย้ายเซิร์ฟเวอร์ปกติทั้งหมด
+            if code == 285 or lowerMsg:find("disconnectclientinitiated") or lowerMsg:find("teleport") or lowerMsg:find("joining") then
+                return
+            end
             if code >= Enum.ConnectionError.DisconnectErrors.Value then
                 onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", code, tostring(msg)))
             end
@@ -108,48 +146,54 @@ pcall(function()
 end)
 
 -- ดักจับหน้าต่าง Popup เตือนหลุดทุกประเภทใน CoreGui (รวมถึง AFK 20 นาที)
-pcall(function()
-    local CoreGui = game:GetService("CoreGui")
-    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
-    if promptGui then
-        local overlay = promptGui:FindFirstChild("promptOverlay")
-        if overlay then
-            -- ตรวจสอบข้อความที่มีอยู่แล้วตอนสคริปต์โหลด
-            for _, desc in ipairs(overlay:GetDescendants()) do
-                if desc:IsA("TextLabel") or desc:IsA("TextBox") then
-                    local txt = desc.Text:lower()
-                    if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
-                        if not txt:find("teleport") and not txt:find("joining") then
-                            onDisconnectDetected("PromptModal: " .. desc.Text)
-                        end
+task.spawn(function()
+    pcall(function()
+        local CoreGui = game:GetService("CoreGui")
+        local promptGui = CoreGui:WaitForChild("RobloxPromptGui", 15)
+        if not promptGui then return end
+        local overlay = promptGui:WaitForChild("promptOverlay", 15)
+        if not overlay then return end
+
+        local function checkPromptLabel(desc)
+            if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then return end
+            if desc:IsA("TextLabel") or desc:IsA("TextBox") then
+                local errCode = 0
+                pcall(function() errCode = GuiService:GetErrorCode().Value end)
+                if errCode == 285 then return end
+
+                local txt = tostring(desc.Text or ""):lower()
+                if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
+                    if not txt:find("teleport") and not txt:find("joining") and not txt:find("285") and not txt:find("disconnectclientinitiated") then
+                        onDisconnectDetected("PromptModal: " .. tostring(desc.Text))
                     end
                 end
             end
-            -- ดักจับข้อความใหม่ที่โผล่ขึ้นมาภายหลัง
-            overlay.DescendantAdded:Connect(function(desc)
-                if desc:IsA("TextLabel") or desc:IsA("TextBox") then
-                    task.wait(0.2)
-                    local txt = desc.Text:lower()
-                    if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
-                        if not txt:find("teleport") and not txt:find("joining") then
-                            onDisconnectDetected("PromptModal: " .. desc.Text)
-                        end
-                    end
-                end
-            end)
         end
-    end
+
+        -- ตรวจสอบข้อความที่มีอยู่แล้วตอนสคริปต์โหลด
+        for _, desc in ipairs(overlay:GetDescendants()) do
+            checkPromptLabel(desc)
+        end
+        -- ดักจับข้อความใหม่ที่โผล่ขึ้นมาภายหลัง
+        overlay.DescendantAdded:Connect(function(desc)
+            task.wait(0.2)
+            checkPromptLabel(desc)
+        end)
+    end)
 end)
 
 -- ฟังก์ชันอัปเดต Heartbeat สื่อสารกับ Watchdog CMD และบันทึก Session
 local function pulseHeartbeat()
-    if not isFileSystemSupported or isKickedOrDisconnected then return end
+    if not isFileSystemSupported or isKickedOrDisconnected or env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then return end
     pcall(function()
-        -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android
-        writefile(heartbeatFile, tostring(os.time()) .. "\n")
+        local nowEpoch = tostring(os.time())
+        -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android (ทั้งรูปแบบ Watchdog และ Rokid)
+        writefile(heartbeatFile, nowEpoch .. "\n")
+        writefile(rokidCheckFile, "working:" .. nowEpoch .. "\n")
         -- 2. บันทึก Session Uptime สะสม ไม่ให้เวลารีตอน Replay / Server Hop
         writefile(sessionFile, HttpService:JSONEncode({
             user_id = player.UserId,
+            username = player.Name,
             session_start = sessionStartTime,
             last_seen = os.time()
         }) .. "\n")
@@ -162,6 +206,7 @@ pulseHeartbeat()
 -- ส่ง Heartbeat สม่ำเสมอทุกๆ 5 วินาทีใน background thread
 task.spawn(function()
     while task.wait(5) do
+        if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
         if not isKickedOrDisconnected then
             pulseHeartbeat()
         end
@@ -451,11 +496,13 @@ end
 -- ส่งครั้งแรกทันที
 task.spawn(function()
     task.wait(2) -- รอ GUI สร้างตัว
+    if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then return end
     sendTelemetry()
-    print("[FarmDashboard] ✅ Telemetry Connected -> " .. API_URL)
+    print("[FarmDashboard] ✅ Telemetry v2.3 Connected -> " .. API_URL)
 
     -- วนลูปส่งต่อเนื่องทุก 15 วินาที
     while task.wait(SEND_INTERVAL) do
+        if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
         sendTelemetry()
     end
 end)
