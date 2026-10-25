@@ -13,7 +13,6 @@ local RunService = game:GetService("RunService")
 
 local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
-local startTime = os.time()
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 if not httpRequest then
@@ -22,6 +21,59 @@ if not httpRequest then
 end
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+-- ============================================================
+-- ⏱️ PERSISTENT BOT SESSION & WATCHDOG HEARTBEAT ENGINE
+-- ============================================================
+local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId))
+local heartbeatFile = "watchdog_heartbeat.txt"
+
+-- อ่านข้อมูล Session เดิมจากเครื่อง (ถ้ามี)
+-- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 5 นาที (300 วิ)
+-- จะนับเวลา Uptime ต่อเนื่องจาก Session เดิมทันที ไม่รีเซ็ตเป็น 0!
+local sessionStartTime = os.time()
+local isFileSystemSupported = (writefile and readfile and isfile) and true or false
+
+if isFileSystemSupported then
+    pcall(function()
+        if isfile(sessionFile) then
+            local content = readfile(sessionFile)
+            local data = HttpService:JSONDecode(content)
+            if data and data.session_start and data.last_seen then
+                local timeSinceLast = os.time() - data.last_seen
+                -- ถ้าห่างจากรอบล่าสุดไม่เกิน 300 วินาที (5 นาที) ให้นับ Uptime ต่อเนื่อง
+                if timeSinceLast >= 0 and timeSinceLast < 300 then
+                    sessionStartTime = data.session_start
+                end
+            end
+        end
+    end)
+end
+
+-- ฟังก์ชันอัปเดต Heartbeat สื่อสารกับ Watchdog CMD และบันทึก Session
+local function pulseHeartbeat()
+    if not isFileSystemSupported then return end
+    pcall(function()
+        -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android
+        writefile(heartbeatFile, tostring(os.time()))
+        -- 2. บันทึก Session Uptime สะสม ไม่ให้เวลารีตอน Replay / Server Hop
+        writefile(sessionFile, HttpService:JSONEncode({
+            user_id = player.UserId,
+            session_start = sessionStartTime,
+            last_seen = os.time()
+        }))
+    end)
+end
+
+-- ส่ง Heartbeat ครั้งแรกทันทีที่โหลดสคริปต์ติด
+pulseHeartbeat()
+
+-- ส่ง Heartbeat สม่ำเสมอทุกๆ 5 วินาทีใน background thread
+task.spawn(function()
+    while task.wait(5) do
+        pulseHeartbeat()
+    end
+end)
 
 -- ตัวแปรเก็บค่าล่าสุด (ป้องกันค่าเพชร/เวลกลายเป็น 0 หรือ 1 ตอนกำลังโหลดห้อง Replay)
 local cached_level = 1
@@ -281,9 +333,11 @@ local function sendTelemetry(customStatus)
         },
         ping = pingMs,
         fps = currentFps,
-        uptime_seconds = os.time() - startTime,
+        uptime_seconds = os.time() - sessionStartTime,
         updated_at = os.time()
     }
+
+    pulseHeartbeat()
 
     pcall(function()
         httpRequest({
@@ -291,7 +345,7 @@ local function sendTelemetry(customStatus)
             Method = "POST",
             Headers = {
                 ["Content-Type"] = "application/json",
-                ["User-Agent"] = "RobloxTelemetry/2.1"
+                ["User-Agent"] = "RobloxTelemetry/2.2"
             },
             Body = HttpService:JSONEncode(payload)
         })
