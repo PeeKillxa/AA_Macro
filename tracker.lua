@@ -1,6 +1,6 @@
 -- ============================================================
--- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.0)
--- Optimized for: Anime Adventures & All Roblox Games
+-- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.1)
+-- Optimized for: Anime Adventures (Lobby + Story/Match) & All Games
 -- Author: cook45 for clack (Tuned for nexuse-website.vercel.app)
 -- วางสคริปต์นี้ใน Auto-Execute ของ Executor ทุกจอ
 -- ============================================================
@@ -22,6 +22,12 @@ if not httpRequest then
 end
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+-- ตัวแปรเก็บค่าล่าสุด (ป้องกันค่าเพชร/เวลกลายเป็น 0 หรือ 1 ตอนกำลังโหลดห้อง Replay)
+local cached_level = 1
+local cached_gems = 0
+local cached_gold = 0
+local cached_rerolls = 0
 
 -- ดึงชื่อแมพเกมอัตโนมัติ
 local gameName = "Roblox Game"
@@ -60,7 +66,17 @@ local function parseNumber(val)
     return num and (num * multiplier) or 0
 end
 
--- Helper: สแกนหาตัวเลขใน PlayerGui (สำหรับ Anime Adventures และเกมที่ไม่มีใน leaderstats)
+-- Helper: สกัดตัวเลขเลเวลโดยเฉพาะ เช่น "Level 7 [18/142]" -> 7
+local function parseLevel(val)
+    if typeof(val) == "number" then return val end
+    if typeof(val) ~= "string" then return nil end
+    local clean = val:gsub("%s+", " ")
+    -- หาตัวเลขหลังคำว่า Level / Lvl / Lv ก่อนอันดับแรก (เช่น "Level 7 [18/142]")
+    local num = clean:match("[Ll]ev?e?l?%s*[:.]?%s*(%d+)") or clean:match("(%d+)")
+    return num and tonumber(num) or nil
+end
+
+-- Helper: สแกนหาตัวเลขใน PlayerGui
 local function findGuiStat(pattern)
     local pg = player:FindFirstChild("PlayerGui")
     if not pg then return nil end
@@ -77,18 +93,37 @@ local function findGuiStat(pattern)
     return nil
 end
 
--- ฟังก์ชันดึงค่า Gems / Gold / Level แบบละเอียด (รองรับทั้ง UI Anime Adventures + leaderstats + Attributes)
+-- ฟังก์ชันดึงค่า Gems / Gold / Level แบบละเอียด (รองรับทั้ง Lobby และห้องเล่น Story/Match)
 local function getGameStats()
     local stats = {
         gems = 0,
         gold = 0,
-        level = 1,
+        level = 0,
         rerolls = 0
     }
 
-    -- 1. ตรวจสอบ UI เฉพาะของ Anime Adventures (แม่นยำ 100%)
     local pg = player:FindFirstChild("PlayerGui")
     if pg then
+        -- 1. ตรวจสอบ Level จากหน้าต่างในห้องเล่น Story / Match:
+        -- Path ตรง: PlayerGui.spawn_units.Lives.Main.Desc.Level (Text: "Level 7 [18/142]")
+        pcall(function()
+            local su = pg:FindFirstChild("spawn_units")
+            if su then
+                local lvlObj = su:FindFirstChild("Lives") 
+                    and su.Lives:FindFirstChild("Main") 
+                    and su.Lives.Main:FindFirstChild("Desc") 
+                    and su.Lives.Main.Desc:FindFirstChild("Level")
+                
+                if lvlObj and (lvlObj:IsA("TextLabel") or lvlObj:IsA("TextBox")) then
+                    local lvl = parseLevel(lvlObj.Text)
+                    if lvl and lvl > 0 then
+                        stats.level = lvl
+                    end
+                end
+            end
+        end)
+
+        -- 2. ตรวจสอบ UI หน้ารวมตอนอยู่ใน Lobby (Spawn UI)
         pcall(function()
             local spawnGui = pg:FindFirstChild("Spawn") and pg.Spawn:FindFirstChild("Main")
             if spawnGui then
@@ -100,14 +135,15 @@ local function getGameStats()
                     if top:FindFirstChild("Gold") and top.Gold:FindFirstChild("Amount") then
                         stats.gold = parseNumber(top.Gold.Amount.Text)
                     end
-                    if top:FindFirstChild("Level") and top.Level:FindFirstChild("Amount") then
-                        stats.level = parseNumber(top.Level.Amount.Text)
+                    if stats.level == 0 and top:FindFirstChild("Level") and top.Level:FindFirstChild("Amount") then
+                        local lvl = parseLevel(top.Level.Amount.Text)
+                        if lvl and lvl > 0 then stats.level = lvl end
                     end
                 end
             end
         end)
 
-        -- ตรวจ Collection UI (หน้าดูของ/เพชร)
+        -- 3. ตรวจ Collection UI (หน้าดูของ/เพชร)
         if stats.gems == 0 then
             pcall(function()
                 local collection = pg:FindFirstChild("Collection") and pg.Collection:FindFirstChild("Main")
@@ -122,9 +158,24 @@ local function getGameStats()
                 end
             end)
         end
+
+        -- 4. ตรวจสอบลึกลงไปใน spawn_units กรณีโครงสร้างลูกเปลี่ยนตำแหน่ง
+        if stats.level == 0 and pg:FindFirstChild("spawn_units") then
+            pcall(function()
+                for _, obj in ipairs(pg.spawn_units:GetDescendants()) do
+                    if obj.Name == "Level" and (obj:IsA("TextLabel") or obj:IsA("TextBox")) and obj.Visible then
+                        local lvl = parseLevel(obj.Text)
+                        if lvl and lvl > 0 then
+                            stats.level = lvl
+                            break
+                        end
+                    end
+                end
+            end)
+        end
     end
 
-    -- 2. ตรวจสอบผ่าน leaderstats, Stats, Data, PlayerData (สำหรับเกมทั่วไป)
+    -- 5. ตรวจสอบผ่าน leaderstats, Stats, Data, PlayerData (สำหรับเกมทั่วไป)
     for _, folderName in ipairs({"leaderstats", "Stats", "Data", "PlayerData", "_stats"}) do
         local folder = player:FindFirstChild(folderName)
         if folder then
@@ -134,8 +185,8 @@ local function getGameStats()
                     stats.gems = parseNumber(item.Value)
                 elseif stats.gold == 0 and (name:find("gold") or name:find("coin") or name:find("cash") or name:find("yen") or name:find("beli")) then
                     stats.gold = parseNumber(item.Value)
-                elseif stats.level <= 1 and (name:find("level") or name:find("lvl") or name:find("lv")) then
-                    stats.level = parseNumber(item.Value)
+                elseif stats.level == 0 and (name:find("level") or name:find("lvl") or name:find("lv")) then
+                    stats.level = parseLevel(item.Value) or 0
                 elseif stats.rerolls == 0 and (name:find("reroll") or name:find("spin")) then
                     stats.rerolls = parseNumber(item.Value)
                 end
@@ -143,7 +194,7 @@ local function getGameStats()
         end
     end
 
-    -- 3. ตรวจสอบผ่าน Player Attributes
+    -- 6. ตรวจสอบผ่าน Player Attributes
     if stats.gems == 0 then
         for _, attr in ipairs({"Gems", "Gem", "Diamonds"}) do
             local v = player:GetAttribute(attr)
@@ -156,22 +207,44 @@ local function getGameStats()
             if v ~= nil then stats.gold = parseNumber(v) break end
         end
     end
-    if stats.level <= 1 then
+    if stats.level == 0 then
         for _, attr in ipairs({"Level", "Lvl", "Lv"}) do
             local v = player:GetAttribute(attr)
-            if v ~= nil then stats.level = parseNumber(v) break end
+            if v ~= nil then stats.level = parseLevel(v) or 0 break end
         end
     end
 
-    -- 4. Smart UI Fallback Scanner (กรณีเกมซ่อนค่าไว้ใน GUI ตัวอื่น)
+    -- 7. Smart UI Fallback Scanner
     if stats.gems == 0 then
         stats.gems = findGuiStat("gem") or 0
     end
     if stats.gold == 0 then
         stats.gold = findGuiStat("gold") or findGuiStat("coin") or 0
     end
-    if stats.level <= 1 then
-        stats.level = findGuiStat("level") or findGuiStat("lvl") or 1
+
+    -- 8. Anti-Flicker Caching: ถ้ากำลังโหลดห้องแล้วหาค่าไม่เจอ ให้จำค่าล่าสุดไว้เสมอ
+    if stats.level > 0 then
+        cached_level = stats.level
+    else
+        stats.level = cached_level
+    end
+
+    if stats.gems > 0 then
+        cached_gems = stats.gems
+    else
+        stats.gems = cached_gems
+    end
+
+    if stats.gold > 0 then
+        cached_gold = stats.gold
+    else
+        stats.gold = cached_gold
+    end
+
+    if stats.rerolls > 0 then
+        cached_rerolls = stats.rerolls
+    else
+        stats.rerolls = cached_rerolls
     end
 
     return stats
@@ -212,36 +285,25 @@ local function sendTelemetry(customStatus)
         updated_at = os.time()
     }
 
-    local success, res = pcall(function()
-        return httpRequest({
+    pcall(function()
+        httpRequest({
             Url = API_URL,
             Method = "POST",
             Headers = {
                 ["Content-Type"] = "application/json",
-                ["User-Agent"] = "RobloxTelemetry/2.0"
+                ["User-Agent"] = "RobloxTelemetry/2.1"
             },
             Body = HttpService:JSONEncode(payload)
         })
     end)
-
-    if success and res then
-        -- Optional: print debug log
-        -- print(string.format("[FarmDashboard] Sent -> Gems: %d | Level: %d (Code: %s)", payload.gems, payload.level, tostring(res.StatusCode)))
-    end
 end
 
--- แจ้งสถานะ OFFLINE ทันทีเมื่อผู้เล่นออกจากเกม / หลุด
-Players.PlayerRemoving:Connect(function(plr)
-    if plr == player then
-        pcall(function()
-            sendTelemetry("OFFLINE")
-        end)
-    end
-end)
+-- หมายเหตุ: ไม่ผูก PlayerRemoving ด้วย OFFLINE อีกต่อไป เพื่อไม่ให้หน้าเว็บเด้งเป็น Offline ตอนกด Replay หรือย้ายห้อง
+-- ฝั่ง Vercel Server มีระบบ timeout 60 วินาทีอยู่แล้ว ถ้าเกมดับจริงเว็บจะขึ้น Offline ให้เองตามธรรมชาติ
 
 -- ส่งครั้งแรกทันที
 task.spawn(function()
-    task.wait(3) -- รอ GUI และ Asset ในเกมโหลดครบ
+    task.wait(2) -- รอ GUI สร้างตัว
     sendTelemetry()
     print("[FarmDashboard] ✅ Telemetry Connected -> " .. API_URL)
 
