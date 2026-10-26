@@ -1,5 +1,5 @@
 -- ============================================================
--- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.3)
+-- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.4)
 -- Optimized for: Anime Adventures (Lobby + Story/Match) & All Games
 -- Author: cook45 for clack (Tuned for nexuse-website.vercel.app & Rokid Watchdog v3.0)
 -- วางสคริปต์นี้ใน Auto-Execute ของ Executor ทุกจอ
@@ -91,21 +91,44 @@ end)
 -- หากสคริปต์เพิ่งถูกรันใหม่จากการ Replay, ย้ายแมพ, หรือเซิร์ฟรี ภายใน 10 นาที (600 วิ)
 -- จะนับเวลา Uptime ต่อเนื่องจาก Session เดิมทันที ไม่รีเซ็ตเป็น 0!
 local sessionStartTime = os.time()
+local sessionWins = 0
+local sessionDisconnects = 0
 local isFileSystemSupported = (writefile and readfile and isfile) and true or false
+local sendTelemetry -- forward declaration
 
 if isFileSystemSupported then
     pcall(function()
         if isfile(sessionFile) then
             local content = readfile(sessionFile)
             local data = HttpService:JSONDecode(content)
-            if data and data.session_start and data.last_seen then
+            if data and data.last_seen then
                 local timeSinceLast = os.time() - data.last_seen
                 -- ถ้าห่างจากรอบล่าสุดไม่เกิน 600 วินาที (10 นาที) ให้นับ Uptime ต่อเนื่อง
-                if timeSinceLast >= 0 and timeSinceLast < 600 then
+                if data.session_start and timeSinceLast >= 0 and timeSinceLast < 600 then
                     sessionStartTime = data.session_start
+                end
+                -- เก็บสถิติชนะ (Wins) และหลุด (Disconnects) ต่อเนื่องตลอด 24 ชั่วโมง (86400 วิ)
+                if timeSinceLast >= 0 and timeSinceLast < 86400 then
+                    sessionWins = tonumber(data.wins) or 0
+                    sessionDisconnects = tonumber(data.disconnects) or 0
                 end
             end
         end
+    end)
+end
+
+-- บันทึกข้อมูล Session ลงไฟล์ JSON
+local function saveSessionData()
+    if not isFileSystemSupported then return end
+    pcall(function()
+        writefile(sessionFile, HttpService:JSONEncode({
+            user_id = player.UserId,
+            username = player.Name,
+            session_start = sessionStartTime,
+            last_seen = os.time(),
+            wins = sessionWins,
+            disconnects = sessionDisconnects
+        }) .. "\n")
     end)
 end
 
@@ -113,10 +136,13 @@ end
 local function onDisconnectDetected(reason)
     if isKickedOrDisconnected then return end
     isKickedOrDisconnected = true
+    sessionDisconnects = sessionDisconnects + 1
     disconnectReason = reason or "Roblox Disconnected / Kicked"
     warn("[AntiAFK/Watchdog] 🚨 DISCONNECT DETECTED: " .. tostring(disconnectReason))
 
     pcall(function()
+        -- บันทึกจำนวนครั้งที่หลุดลงไฟล์ Session ก่อนรีจอ
+        saveSessionData()
         -- 1. ลบ Heartbeat file ทิ้งทันที! เพื่อให้ Watchdog รู้ว่าสคริปต์หยุด
         if delfile and isfile and isfile(heartbeatFile) then
             delfile(heartbeatFile)
@@ -124,6 +150,13 @@ local function onDisconnectDetected(reason)
         -- 2. เขียนไฟล์แจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python อ่านและสั่งรีจอทันที
         if writefile then
             writefile("watchdog_disconnected.txt", tostring(disconnectReason) .. "\n")
+        end
+    end)
+
+    -- ส่งสถานะ OFFLINE และยอดหลุดล่าสุดเข้าเว็บทันที
+    task.spawn(function()
+        if sendTelemetry then
+            pcall(sendTelemetry, "OFFLINE")
         end
     end)
 end
@@ -190,13 +223,8 @@ local function pulseHeartbeat()
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android (ทั้งรูปแบบ Watchdog และ Rokid)
         writefile(heartbeatFile, nowEpoch .. "\n")
         writefile(rokidCheckFile, "working:" .. nowEpoch .. "\n")
-        -- 2. บันทึก Session Uptime สะสม ไม่ให้เวลารีตอน Replay / Server Hop
-        writefile(sessionFile, HttpService:JSONEncode({
-            user_id = player.UserId,
-            username = player.Name,
-            session_start = sessionStartTime,
-            last_seen = os.time()
-        }) .. "\n")
+        -- 2. บันทึก Session Uptime + Wins + Disconnects สะสม ไม่ให้รีตอน Replay / Server Hop
+        saveSessionData()
     end)
 end
 
@@ -210,6 +238,67 @@ task.spawn(function()
         if not isKickedOrDisconnected then
             pulseHeartbeat()
         end
+    end
+end)
+
+-- ============================================================
+-- 🏆 ANIME ADVENTURES MATCH WIN DETECTOR (ResultsUI Watcher)
+-- ตรวจจับหน้าจอจบด่าน (ResultsUI.Holder.Title == "VICTORY" หรือ ResultsUI.Finished)
+-- บันทึกจำนวนครั้งที่ชนะ (sessionWins) ลงไฟล์ทันทีและส่งเข้าเว็บก่อนวาร์ป Replay
+-- ============================================================
+local hasCountedMatchResult = false
+
+local function getCurrentWave()
+    local ok, val = pcall(function()
+        return workspace._wave_num and tonumber(workspace._wave_num.Value) or 0
+    end)
+    return (ok and val) or 0
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
+        pcall(function()
+            local pg = player:FindFirstChild("PlayerGui")
+            local rui = pg and pg:FindFirstChild("ResultsUI")
+            local holder = rui and rui:FindFirstChild("Holder")
+            local finished = rui and rui:FindFirstChild("Finished")
+            local isResultsOpen = rui and (
+                rui.Enabled == true
+                or (holder and holder.Visible == true)
+                or (finished and finished.Visible == true)
+            )
+
+            if isResultsOpen then
+                if not hasCountedMatchResult then
+                    local titleObj = holder and holder:FindFirstChild("Title")
+                    local titleText = titleObj and tostring(titleObj.Text or ""):upper() or ""
+                    local isDefeat = titleText:find("DEFEAT") ~= nil or titleText:find("LOSE") ~= nil or titleText:find("OVER") ~= nil
+                    local isVictory = titleText:find("VICTORY") ~= nil
+                        or ((rui.Enabled or (finished and finished.Visible)) and not isDefeat and titleText ~= "")
+                        or (finished and finished.Visible and not isDefeat)
+
+                    if isVictory or isDefeat then
+                        hasCountedMatchResult = true
+                        if isVictory then
+                            sessionWins = sessionWins + 1
+                            saveSessionData()
+                            print(string.format("[FarmDashboard] 🏆 VICTORY DETECTED! Total Wins: %d", sessionWins))
+                            if sendTelemetry then
+                                task.spawn(function()
+                                    pcall(sendTelemetry, "ONLINE")
+                                end)
+                            end
+                        end
+                    end
+                end
+            else
+                -- รีเซ็ตตัวล็อกเมื่อปิดหน้า ResultsUI หรือเริ่มเวฟใหม่ (Wave 0/1)
+                if hasCountedMatchResult and getCurrentWave() <= 1 then
+                    hasCountedMatchResult = false
+                end
+            end
+        end)
     end
 end)
 
@@ -441,7 +530,7 @@ local function getGameStats()
 end
 
 -- ฟังก์ชันส่ง Telemetry เข้าเว็บ Vercel
-local function sendTelemetry(customStatus)
+sendTelemetry = function(customStatus)
     local pingMs = 50
     pcall(function()
         local item = Stats.Network.ServerStatsItem["Data Ping"]
@@ -449,6 +538,7 @@ local function sendTelemetry(customStatus)
     end)
 
     local gameStats = getGameStats()
+    local curWave = getCurrentWave()
 
     local payload = {
         user_id = player.UserId,
@@ -466,8 +556,11 @@ local function sendTelemetry(customStatus)
         level = gameStats.level,
         gems = gameStats.gems,
         gold = gameStats.gold,
+        wins = sessionWins,
+        disconnects = sessionDisconnects,
         extra_stats = {
-            rerolls = gameStats.rerolls
+            rerolls = gameStats.rerolls,
+            wave = curWave > 0 and ("Wave " .. tostring(curWave)) or "Lobby"
         },
         ping = pingMs,
         fps = currentFps,
@@ -483,7 +576,7 @@ local function sendTelemetry(customStatus)
             Method = "POST",
             Headers = {
                 ["Content-Type"] = "application/json",
-                ["User-Agent"] = "RobloxTelemetry/2.2"
+                ["User-Agent"] = "RobloxTelemetry/2.4"
             },
             Body = HttpService:JSONEncode(payload)
         })
@@ -491,14 +584,14 @@ local function sendTelemetry(customStatus)
 end
 
 -- หมายเหตุ: ไม่ผูก PlayerRemoving ด้วย OFFLINE อีกต่อไป เพื่อไม่ให้หน้าเว็บเด้งเป็น Offline ตอนกด Replay หรือย้ายห้อง
--- ฝั่ง Vercel Server มีระบบ timeout 60 วินาทีอยู่แล้ว ถ้าเกมดับจริงเว็บจะขึ้น Offline ให้เองตามธรรมชาติ
+-- ฝั่ง Vercel Server มีระบบ timeout 120 วินาทีอยู่แล้ว ถ้าเกมดับจริงเว็บจะขึ้น Offline ให้เองตามธรรมชาติ
 
 -- ส่งครั้งแรกทันที
 task.spawn(function()
     task.wait(2) -- รอ GUI สร้างตัว
     if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then return end
     sendTelemetry()
-    print("[FarmDashboard] ✅ Telemetry v2.3 Connected -> " .. API_URL)
+    print("[FarmDashboard] ✅ Telemetry v2.4 Connected -> " .. API_URL)
 
     -- วนลูปส่งต่อเนื่องทุก 15 วินาที
     while task.wait(SEND_INTERVAL) do
