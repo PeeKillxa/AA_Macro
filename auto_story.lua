@@ -706,6 +706,55 @@ local function walkToDoor(doorPart)
     end
 end
 
+-- สั่งตัวละครเดินเข้าหาประตูเรื่อยๆ เพื่อรักษาตำแหน่งและป้องกันการหลุดออกจากห้อง
+local function keepWalkingInsideDoor(doorPart)
+    if not doorPart then return end
+    local char = getCharacter()
+    local root = getRoot()
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
+
+    local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
+    hum:MoveTo(targetPos)
+
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(root, doorPart, 0)
+            task.wait(0.04)
+            firetouchinterest(root, doorPart, 1)
+        end)
+    end
+end
+
+-- สั่งออกเข้าเกมใหม่ (Rejoin Server) เมื่อล็อคห้องไม่ผ่านเกิน 3 รอบ
+local function rejoinServer()
+    local TeleportService = game:GetService("TeleportService")
+
+    pcall(function()
+        local scriptCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/PeeKillxa/AA_Macro/main/auto_story.lua"))()'
+        if typeof(queue_on_teleport) == "function" then
+            queue_on_teleport(scriptCode)
+        elseif typeof(syn) == "table" and typeof(syn.queue_on_teleport) == "function" then
+            syn.queue_on_teleport(scriptCode)
+        end
+    end)
+
+    pcall(function()
+        if #Players:GetPlayers() <= 1 then
+            LocalPlayer:Kick("\n[AA Auto Story] ล็อคห้องไม่ผ่าน 3 รอบ กำลัง Rejoin...")
+            task.wait(0.5)
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        else
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end
+    end)
+
+    task.wait(3)
+    pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+end
+
 local function lockDoorLevel(doorModelName, levelId, friendsOnly, difficulty)
     local remote = ReplicatedStorage:FindFirstChild("endpoints")
         and ReplicatedStorage.endpoints:FindFirstChild("client_to_server")
@@ -949,6 +998,7 @@ end)
 -- ── 8. Core Workflow Automation Engine ────────────────────────────────────────
 
 local isProcessing = false
+local doorLockFailCount = 0
 
 local function handleLobbyProgression()
     if not Config.Enabled or isProcessing then return end
@@ -1047,6 +1097,47 @@ local function handleLobbyProgression()
             end
         end
 
+        -- 5. ตรวจสอบสถานะป้ายหน้าห้องว่าเปลี่ยนเป็น "Waiting for players..." หรือไม่
+        updateUIStatus("VERIFYING DOOR", "ตรวจสอบสถานะประตู (Waiting for players...)...")
+        local verifiedWaiting = false
+        local checkStart = tick()
+        while tick() - checkStart < 6 do
+            local curInfo = getDoorInfo(doorInfo.model)
+            if curInfo and (curInfo.isWaiting or (#curInfo.mapText > 0 and #curInfo.lvlText > 0 and not curInfo.isSelecting)) then
+                verifiedWaiting = true
+                break
+            end
+            task.wait(0.5)
+        end
+
+        -- ถ้าสถานะไม่ขึ้น Waiting for players...
+        if not verifiedWaiting then
+            doorLockFailCount = doorLockFailCount + 1
+            warn(string.format("[AutoStory] ⚠️ Door status is NOT waiting for players! Attempt %d/3", doorLockFailCount))
+
+            -- ถ้าไม่ได้จริงๆ เกิน 3 รอบ สั่งออกเข้าใหม่เลย!
+            if doorLockFailCount >= 3 then
+                updateUIStatus("REJOINING", "ล็อคห้องไม่ผ่านครบ 3 รอบ! กำลัง Rejoin เซิร์ฟเวอร์ใหม่...")
+                task.wait(1.5)
+                rejoinServer()
+                isProcessing = false
+                return
+            end
+
+            -- ถอยหลังออกจากประตู แล้วเริ่มทำใหม่แต่แรก
+            updateUIStatus("RETRYING", string.format("สถานะไม่ขึ้น Waiting for players (รอบ %d/3) ก้าวออกมาเริ่มใหม่...", doorLockFailCount))
+            local root = getRoot()
+            if root and doorInfo and doorInfo.door then
+                root.CFrame = doorInfo.door.CFrame * CFrame.new(0, 0, 16)
+            end
+            task.wait(2.0)
+            isProcessing = false
+            return
+        end
+
+        -- ถ้าล็อคห้องสำเร็จ รีเซ็ตตัวนับล้มเหลว
+        doorLockFailCount = 0
+
         -- If Solo Mode: ไม่มีเพื่อนต้องรอ กด START เริ่มเกมทันที!
         if Config.Mode == "Solo" then
             updateUIStatus("STARTING SOLO", "ล็อคด่านแล้ว กำลังกดปุ่ม START...")
@@ -1062,11 +1153,14 @@ local function handleLobbyProgression()
             return
         end
 
-        -- If Party Leader Mode: ล็อคด่านเสร็จแล้ว ไม่ต้องทำอะไร ยืนรอเพื่อนร่วมตี้เดินเข้ามา!
-        updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว ยืนรอเพื่อนเข้าห้อง (1/%d คน)...", Config.PartySize))
+        -- If Party Leader Mode: ล็อคด่านเสร็จแล้ว เดินเข้าหาประตูเรื่อยๆ ยืนรอเพื่อนร่วมตี้เข้ามา!
+        updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว เดินเลี้ยงในห้องรอเพื่อน (1/%d คน)...", Config.PartySize))
 
         local waitStart = tick()
         while tick() - waitStart < Config.DoorWaitTimeout do
+            -- เดินเข้าหาประตูเรื่อยๆ เพื่อไม่ให้หลุดและรักษาการสัมผัสประตูตลอดเวลา
+            keepWalkingInsideDoor(doorInfo.door)
+
             local currentPlayers = countPlayersInDoor(doorInfo.door)
             State.PartyCount = currentPlayers
             updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว รอเพื่อนร่วมตี้ (%d/%d คน)", currentPlayers, Config.PartySize))
@@ -1076,6 +1170,7 @@ local function handleLobbyProgression()
                 updateUIStatus("PARTY FULL", "สมาชิกครบแล้ว! กำลังกดปุ่ม START...")
                 task.wait(0.8)
                 for attempt = 1, 4 do
+                    keepWalkingInsideDoor(doorInfo.door)
                     local ok, msg = pressStartMatchButton()
                     if ok then
                         print(string.format("[AutoStory] 🟢 Party full -> Pressed START attempt #%d!", attempt))
@@ -1086,7 +1181,7 @@ local function handleLobbyProgression()
                 task.wait(3)
                 break
             end
-            task.wait(1.5)
+            task.wait(0.8)
         end
 
         isProcessing = false
@@ -1103,13 +1198,14 @@ local function handleLobbyProgression()
         updateUIStatus("CHECKING LEADER", "กำลังเช็คสถานะห้องของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
         local doorInfo, statusReason = findLeaderDoor(Config.LeaderUsername, target.mapName, target.act)
 
-        -- ถ้าลูกตี้ยืนอยู่ในประตูของหัวตี้อยู่แล้ว ให้ยืนรอจนกว่าด่านจะเริ่ม
+        -- ถ้าลูกตี้ยืนอยู่ในประตูของหัวตี้อยู่แล้ว ให้เดินเลี้ยงตำแหน่งเข้าหาประตูเรื่อยๆ
         if doorInfo and doorInfo.door then
             local root = getRoot()
             if root and (root.Position - doorInfo.door.Position).Magnitude <= 10 then
                 State.CurrentDoorName = doorInfo.model.Name
-                updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย รอด่านเริ่มพร้อมตี้...")
-                task.wait(3)
+                updateUIStatus("IN LOBBY DOOR", "อยู่ในประตู เดินเลี้ยงรอหัวห้องกดเริ่ม...")
+                keepWalkingInsideDoor(doorInfo.door)
+                task.wait(0.8)
                 isProcessing = false
                 return
             end
@@ -1134,9 +1230,10 @@ local function handleLobbyProgression()
 
         -- 4. เดินเข้าประตูของหัวตี้
         walkToDoor(doorInfo.door)
+        keepWalkingInsideDoor(doorInfo.door)
 
-        updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย รอด่านเริ่มพร้อมตี้...")
-        task.wait(3)
+        updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย เดินเลี้ยงรอหัวห้องกดเริ่ม...")
+        task.wait(1.5)
         isProcessing = false
     end
 end
