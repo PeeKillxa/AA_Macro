@@ -19,7 +19,21 @@ local GuiService        = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local LOBBY_PLACE_ID = 8304191830
 
--- ── 0. Anti-Duplicate UI Cleanup ──────────────────────────────────────────────
+-- ── Lobby Guard Check ─────────────────────────────────────────────────────────
+-- ตรวจสอบว่าอยู่ใน Lobby หรือไม่ (PlaceId: 8304191830 หรือมีโฟลเดอร์ _LOBBIES.Story)
+-- ถ้าอยู่ในด่านเล่นเกม (Match / Game) สคริปต์จะหยุดการทำงานทันที (ไม่เปิด UI, ไม่รันในแมพ)
+local function isLobby()
+    if game.PlaceId == LOBBY_PLACE_ID then return true end
+    if Workspace:FindFirstChild("_LOBBIES") and Workspace._LOBBIES:FindFirstChild("Story") then
+        return true
+    end
+    return false
+end
+
+if not isLobby() then
+    print("[AA Auto Story] 🛑 Not in Lobby (PlaceId: " .. tostring(game.PlaceId) .. "). Script will ONLY run in Lobby!")
+    return
+end
 local gethui = gethui or function() return game:GetService("CoreGui") end
 if _G.AA_AutoStoryUI and typeof(_G.AA_AutoStoryUI.Destroy) == "function" then
     pcall(function() _G.AA_AutoStoryUI:Destroy() end)
@@ -658,91 +672,55 @@ local function handleLobbyProgression()
     end
 end
 
--- ── 9. In-Match Victory & ACT 6 Detection ──────────────────────────────────────
-local function handleInMatchProgression()
-    if not Config.Enabled then return end
-    updateUIStatus("IN-GAME", "กำลังเล่นด่านสตอรี่...")
-
-    -- Read last recorded match
+-- ── 9. Lobby Return & ACT 6 Victory Verification ─────────────────────────────
+local function checkLastMatchOutcome()
+    if not isfile or not isfile(LAST_MATCH_FILE) then return end
     local lastMatch = nil
     pcall(function()
-        if isfile and isfile(LAST_MATCH_FILE) then
-            lastMatch = HttpService:JSONDecode(readfile(LAST_MATCH_FILE))
-        end
+        lastMatch = HttpService:JSONDecode(readfile(LAST_MATCH_FILE))
     end)
+    if not lastMatch then return end
 
-    local pGui = LocalPlayer:WaitForChild("PlayerGui", 10)
-    if not pGui then return end
-
-    -- Monitor Game Finished / Results / Vote Screen
-    local resultsDetected = false
-
-    -- Method A: Look for Results or Vote UI
-    for _, guiName in ipairs({ "ResultsUI", "EndGameUI", "VoteGui", "RewardUI", "Results" }) do
-        local g = pGui:FindFirstChild(guiName)
-        if g and g.Enabled then
-            resultsDetected = true
-            break
-        end
-    end
-
-    -- Method B: Check game_finished endpoint vote or dialog
-    local notifWindows = pGui:FindFirstChild("NotificationWindows")
-    if notifWindows and notifWindows:FindFirstChild("VotePrompt") then
-        resultsDetected = true
-    end
-
-    if resultsDetected and not isProcessing then
-        isProcessing = true
-        State.TotalRuns = State.TotalRuns + 1
-
-        -- Check if Act 6 was cleared
-        if lastMatch and lastMatch.isAct6 and Config.NotifyAct6 then
-            State.Act6ClearedCount = State.Act6ClearedCount + 1
-            sendWebhook(
-                "🏆 [Anime Adventures] ผ่านด่าน ACT 6 สำเร็จ!",
-                string.format("🎉 **เคลียร์ด่านสุดท้ายของแมพสำเร็จแล้ว!**\n\n🗺️ **แมพ:** `%s` (`%s`)\n⭐ **ระดับ:** `Act %d (Normal)`\n👤 **ผู้เล่น:** `%s`\n🎮 **โหมด:** `%s`",
-                    lastMatch.mapName, lastMatch.mapId, lastMatch.act, LocalPlayer.Name, Config.Mode),
-                0x00FF88,
-                {
-                    { name = "🗺️ โลก", value = lastMatch.mapName, inline = true },
-                    { name = "⭐ ด่าน", value = "Act " .. tostring(lastMatch.act), inline = true },
-                    { name = "⏱️ เวลา", value = os.date("%H:%M:%S"), inline = true }
-                }
-            )
-            -- Clean file so we don't double notify
-            pcall(function() if delfile then delfile(LAST_MATCH_FILE) end end)
-        end
-
-        -- Auto vote Next / Replay / Leave
-        if Config.AutoReplayOrNext then
-            local voteRemote = ReplicatedStorage:FindFirstChild("endpoints")
-                and ReplicatedStorage.endpoints:FindFirstChild("client_to_server")
-                and ReplicatedStorage.endpoints.client_to_server:FindFirstChild("set_game_finished_vote")
-            if voteRemote then
-                pcall(function() voteRemote:InvokeServer("next") end)
-                task.wait(1)
-                pcall(function() voteRemote:InvokeServer("leave") end)
+    -- ตรวจสอบว่าด่านที่เพิ่งเล่นไปคือ ACT 6 หรือไม่
+    if lastMatch.isAct6 and Config.NotifyAct6 then
+        local target, _ = scanStoryProgress()
+        if target and target.allMaps then
+            for _, m in ipairs(target.allMaps) do
+                -- ถ้าแมพเป้าหมายเดิมตอนนี้ขึ้นเคลียร์ครบ 6/6 แล้ว แสดงว่าเพิ่งชนะ ACT 6 สดๆ ร้อนๆ!
+                if m.id == lastMatch.mapId and m.cleared >= 6 then
+                    State.Act6ClearedCount = State.Act6ClearedCount + 1
+                    sendWebhook(
+                        "🏆 [Anime Adventures] ผ่านด่าน ACT 6 สำเร็จ!",
+                        string.format("🎉 **เคลียร์ด่านสุดท้ายของแมพสำเร็จแล้ว!**\n\n🗺️ **แมพ:** `%s` (`%s`)\n⭐ **ระดับ:** `Act 6 (Completed)`\n👤 **ผู้เล่น:** `%s`\n🎮 **โหมด:** `%s`",
+                            lastMatch.mapName, lastMatch.mapId, LocalPlayer.Name, Config.Mode),
+                        0x00FF88,
+                        {
+                            { name = "🗺️ โลก", value = lastMatch.mapName, inline = true },
+                            { name = "⭐ ระดับ", value = "Act 6 (Cleared)", inline = true },
+                            { name = "⏱️ เวลา", value = os.date("%H:%M:%S"), inline = true }
+                        }
+                    )
+                    break
+                end
             end
         end
-
-        task.wait(10)
-        isProcessing = false
     end
+    -- ลบไฟล์บันทึกสถานะรอบก่อน เพื่อไม่ให้แจ้งเตือนซ้ำ
+    pcall(function() if delfile then delfile(LAST_MATCH_FILE) end end)
 end
 
--- ── 10. Main Loop Thread ──────────────────────────────────────────────────────
+-- ── 10. Main Lobby Loop Thread ────────────────────────────────────────────────
 task.spawn(function()
+    -- รอให้ UI ในล็อบบี้โหลดสมบูรณ์
+    task.wait(2)
+    checkLastMatchOutcome()
+
     while true do
         pcall(function()
-            if game.PlaceId == LOBBY_PLACE_ID then
-                handleLobbyProgression()
-            else
-                handleInMatchProgression()
-            end
+            handleLobbyProgression()
         end)
         task.wait(Config.CheckInterval or 3.0)
     end
 end)
 
-print("[AA Auto Story] 🚀 Script loaded successfully!")
+print("[AA Auto Story] 🚀 Lobby Story Engine loaded successfully!")
