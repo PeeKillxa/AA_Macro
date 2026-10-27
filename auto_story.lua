@@ -537,10 +537,10 @@ local function lockStoryLevelInUI(target)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not pGui then return false, "PlayerGui not found" end
 
-    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 3.5 วินาที)
+    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 4 วินาที)
     local lvlGui = pGui:FindFirstChild("LevelSelectGui")
     local t0 = tick()
-    while not lvlGui and (tick() - t0 < 3.5) do
+    while not lvlGui and (tick() - t0 < 4) do
         task.wait(0.2)
         lvlGui = pGui:FindFirstChild("LevelSelectGui")
     end
@@ -562,7 +562,7 @@ local function lockStoryLevelInUI(target)
                     if btn then
                         clickGuiElement(btn)
                         clicked = true
-                        task.wait(0.35)
+                        task.wait(0.5)
                     end
                 end
             end
@@ -580,17 +580,21 @@ local function lockStoryLevelInUI(target)
                 if target.act and actButtons[target.act] then
                     clickGuiElement(actButtons[target.act])
                     clicked = true
-                    task.wait(0.2)
+                    task.wait(0.5)
                 end
             end
 
-            -- 3. กดปุ่ม Select ใน LevelSelect.Buttons.Select (ปุ่มล็อคด่านจริงของเกม)
+            -- 3. เว้นจังหวะ 3.5 วินาที ตามที่ clack สั่ง เพื่อให้เกมโหลดแอนิเมชันและดาต้าพร้อม 100%
+            updateUIStatus("WAITING SELECT", string.format("เลือก %s Act %d แล้ว... รอ 3.5 วินาทีก่อนกด Select", target.mapName, target.act))
+            task.wait(3.5)
+
+            -- 4. กดปุ่ม Select ใน LevelSelect.Buttons.Select (ปุ่มล็อคด่านจริงของเกม)
             local levelSelect = lvlGui:FindFirstChild("LevelSelect")
             local selectBtn = levelSelect and levelSelect:FindFirstChild("Buttons") and levelSelect.Buttons:FindFirstChild("Select")
             if selectBtn and selectBtn.Visible then
                 clickGuiElement(selectBtn)
                 clicked = true
-                task.wait(0.2)
+                task.wait(0.5)
             end
         end)
     end
