@@ -173,6 +173,96 @@ local function getLevelSelectContainer()
 end
 
 local function scanStoryProgress()
+    -- 1. ระบบหลัก: ดึงข้อมูลความคืบหน้าตรงจาก Memory & Profile Data ของเกม (ไม่ต้องรอเปิดประตู UI)
+    local ok, memTarget = pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        local src = rs:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then return nil end
+
+        local Loader = require(loaderModule)
+        local ProgressionServiceCore = Loader.load_core_service(nil, "ProgressionServiceCore")
+        local Worlds = Loader.load_data(nil, "Worlds")
+        local WorldLevelOrder = Loader.load_data(nil, "WorldLevelOrder")
+
+        local session = nil
+        if getgc then
+            for _, obj in ipairs(getgc(true)) do
+                if type(obj) == "table" and rawget(obj, "level_data") and rawget(obj.level_data, "completed_story_levels") then
+                    session = { profile_data = obj }
+                    break
+                end
+            end
+        end
+
+        if not session or not session.profile_data or not session.profile_data.level_data then
+            return nil
+        end
+
+        local lvlData = session.profile_data.level_data
+        local completedLevels = lvlData.completed_story_levels or {}
+        local storyOrder = WorldLevelOrder and WorldLevelOrder.WORLD_ORDER or {}
+
+        for _, worldId in ipairs(storyOrder) do
+            local wInfo = Worlds and Worlds[worldId]
+            if wInfo and not wInfo.legend_stage and not wInfo.raid_world then
+                local unlocked = ProgressionServiceCore.check_if_unlocked_world(lvlData, worldId)
+                if unlocked then
+                    local totalActs = 0
+                    local clearedActs = 0
+                    local levels = {}
+                    for k, lvl in pairs(wInfo.levels or {}) do
+                        if not lvl.is_infinite and not lvl.is_raid then
+                            totalActs = totalActs + 1
+                            local actNum = tonumber(k) or tonumber(lvl.id:match("%d+$")) or 1
+                            local c = completedLevels[lvl.id]
+                            local isCleared = (c and c.times_completed and c.times_completed > 0)
+                            if isCleared then
+                                clearedActs = clearedActs + 1
+                            end
+                            table.insert(levels, {
+                                act = actNum,
+                                id = lvl.id,
+                                cleared = isCleared
+                            })
+                        end
+                    end
+
+                    table.sort(levels, function(a, b) return a.act < b.act end)
+
+                    if clearedActs < totalActs then
+                        local nextActInfo = nil
+                        for _, l in ipairs(levels) do
+                            if not l.cleared then
+                                nextActInfo = l
+                                break
+                            end
+                        end
+                        local actNum = nextActInfo and nextActInfo.act or (clearedActs + 1)
+                        local lvlId = nextActInfo and nextActInfo.id or string.format("%s_level_%d", worldId, actNum)
+                        return {
+                            completed = false,
+                            mapId     = worldId,
+                            mapName   = wInfo.name or worldId,
+                            act       = actNum,
+                            totalActs = totalActs,
+                            cleared   = clearedActs,
+                            levelId   = lvlId,
+                            isAct6    = (actNum == totalActs)
+                        }
+                    end
+                end
+            end
+        end
+
+        return { completed = true }
+    end)
+
+    if ok and memTarget then
+        return memTarget, "Profile Data Memory Scan"
+    end
+
+    -- 2. ระบบสำรอง: สแกนจาก DOM LevelSelectGui เมื่อผู้เล่นเปิดหน้าต่างในประตู
     local container = getLevelSelectContainer()
     if not container then
         return nil, "Waiting for LevelSelectGui.MapSelect.Main.Wrapper.Container..."
@@ -182,33 +272,37 @@ local function scanStoryProgress()
     for _, child in ipairs(container:GetChildren()) do
         if child:IsA("GuiObject") and child:FindFirstChild("Main") then
             local mapId = child.Name
-            local main = child.Main
-            local mapContainer = main:FindFirstChild("Container")
-            local mapNameLabel = mapContainer and mapContainer:FindFirstChild("MapName")
-            local mapName = mapNameLabel and (mapNameLabel:IsA("TextLabel") and mapNameLabel.Text or mapNameLabel.Value) or mapId
+            -- ตัด placeholder / ComingSoon ทิ้งเด็ดขาด
+            if not mapId:lower():find("comingsoon") and not mapId:lower():find("placeholder") then
+                local main = child.Main
+                local mapContainer = main:FindFirstChild("Container")
+                local mapNameLabel = mapContainer and mapContainer:FindFirstChild("MapName")
+                local mapName = mapNameLabel and (mapNameLabel:IsA("TextLabel") and mapNameLabel.Text or mapNameLabel.Value) or mapId
 
-            local lockedObj = main:FindFirstChild("Locked") and main.Locked:FindFirstChild("locked")
-            local isLocked = lockedObj and lockedObj.Visible or false
+                -- ตรวจสอบจาก Frame Locked.Visible ตรงๆ (ถ้าเป็น false คือปลดล็อคแล้ว)
+                local lockedFrame = main:FindFirstChild("Locked")
+                local isLocked = lockedFrame and lockedFrame.Visible or false
 
-            local levelsObj = mapContainer and mapContainer:FindFirstChild("LevelsCleared") and mapContainer.LevelsCleared:FindFirstChild("V")
-            local clearedStr = levelsObj and (levelsObj:IsA("TextLabel") and levelsObj.Text or tostring(levelsObj.Value)) or "0/6"
-            local cleared, total = clearedStr:match("(%d+)/(%d+)")
-            cleared = tonumber(cleared) or 0
-            total = tonumber(total) or 6
+                local levelsObj = mapContainer and mapContainer:FindFirstChild("LevelsCleared") and mapContainer.LevelsCleared:FindFirstChild("V")
+                local clearedStr = levelsObj and (levelsObj:IsA("TextLabel") and levelsObj.Text or tostring(levelsObj.Value)) or "0/6"
+                local cleared, total = clearedStr:match("(%d+)/(%d+)")
+                cleared = tonumber(cleared) or 0
+                total = tonumber(total) or 6
 
-            local order = child.LayoutOrder or 0
-            if order == 0 and child.AbsolutePosition then
-                order = math.floor(child.AbsolutePosition.X + child.AbsolutePosition.Y * 1000)
+                local order = child.LayoutOrder or 0
+                if order == 0 and child.AbsolutePosition then
+                    order = math.floor(child.AbsolutePosition.X + child.AbsolutePosition.Y * 1000)
+                end
+
+                table.insert(maps, {
+                    id       = mapId,
+                    name     = mapName,
+                    isLocked = isLocked,
+                    cleared  = cleared,
+                    total    = total,
+                    order    = order
+                })
             end
-
-            table.insert(maps, {
-                id       = mapId,
-                name     = mapName,
-                isLocked = isLocked,
-                cleared  = cleared,
-                total    = total,
-                order    = order
-            })
         end
     end
 
@@ -234,12 +328,11 @@ local function scanStoryProgress()
                     levelId        = levelId,
                     isAct6         = (nextAct == m.total),
                     allMaps        = maps
-                }, "Found Next Story Level"
+                }, "Found Next Story Level via UI"
             end
         end
     end
 
-    -- All unlocked maps are cleared!
     return {
         completed = true,
         allMaps   = maps
@@ -457,6 +550,9 @@ local function pressStartButton(target)
     end
 
     -- 1. ถ้ามีข้อมูล target ลองเลือกแมพและระดับ Act ให้ตรงใน UI ก่อนกด Start
+    local clicked = false
+
+    -- 1. ถ้ามีข้อมูล target เลือกแมพและระดับ Act ให้ตรงใน UI
     if target and target.mapId then
         pcall(function()
             local container = getLevelSelectContainer()
@@ -466,56 +562,65 @@ local function pressStartButton(target)
                     local btn = mapCard:IsA("GuiButton") and mapCard or mapCard:FindFirstChildWhichIsA("GuiButton", true)
                     if btn then
                         clickGuiElement(btn)
-                        task.wait(0.2)
+                        clicked = true
+                        task.wait(0.35)
                     end
                 end
             end
 
-            if target.act then
-                local actTargetStr = "act " .. tostring(target.act)
-                for _, desc in ipairs(lvlGui:GetDescendants()) do
-                    if desc:IsA("GuiButton") then
-                        local txt = desc:IsA("TextButton") and desc.Text:lower() or desc.Name:lower()
-                        if txt == actTargetStr or txt == tostring(target.act) then
-                            clickGuiElement(desc)
-                            task.wait(0.1)
-                            break
-                        end
+            -- 2. เลือกปุ่ม Act ภายใน LevelSelect.InfoFrame.LevelButtons
+            local levelSelect = lvlGui:FindFirstChild("LevelSelect")
+            if levelSelect and levelSelect:FindFirstChild("InfoFrame") and levelSelect.InfoFrame:FindFirstChild("LevelButtons") then
+                local actButtons = {}
+                for _, b in ipairs(levelSelect.InfoFrame.LevelButtons:GetChildren()) do
+                    if b:IsA("GuiButton") and b.LayoutOrder and b.LayoutOrder > 0 then
+                        table.insert(actButtons, b)
                     end
                 end
+                table.sort(actButtons, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+                if target.act and actButtons[target.act] then
+                    clickGuiElement(actButtons[target.act])
+                    clicked = true
+                    task.wait(0.2)
+                end
+            end
+
+            -- 3. กดปุ่ม Select ใน LevelSelect.Buttons.Select (ปุ่มล็อคด่านจริงของเกม)
+            local levelSelect = lvlGui:FindFirstChild("LevelSelect")
+            local selectBtn = levelSelect and levelSelect:FindFirstChild("Buttons") and levelSelect.Buttons:FindFirstChild("Select")
+            if selectBtn and selectBtn.Visible then
+                clickGuiElement(selectBtn)
+                clicked = true
+                task.wait(0.2)
             end
         end)
     end
 
-    -- 2. ค้นหาปุ่ม Start ใน LevelSelectGui.Buttons.Start
+    -- 4. ค้นหาปุ่ม Start ใน LevelSelectGui.Buttons.Start (สำหรับเริ่มแมตช์)
     local buttons = lvlGui:FindFirstChild("Buttons")
     local startObj = buttons and buttons:FindFirstChild("Start")
     if not startObj then
         startObj = lvlGui:FindFirstChild("Start", true)
     end
 
-    if not startObj then
-        return false, "Start button not found in LevelSelectGui.Buttons.Start"
-    end
+    if startObj and (startObj.Visible or (startObj:IsA("GuiObject") and startObj.AbsoluteSize.X > 0)) then
+        if startObj:IsA("GuiButton") then
+            clicked = clickGuiElement(startObj) or clicked
+        end
 
-    -- 3. ยิงคำสั่งคลิกทุกวิธี (firesignal, getconnections, VIM, VirtualUser)
-    local clicked = false
-    if startObj:IsA("GuiButton") then
-        clicked = clickGuiElement(startObj) or clicked
-    end
+        for _, ch in ipairs(startObj:GetChildren()) do
+            if ch:IsA("GuiButton") then
+                clicked = clickGuiElement(ch) or clicked
+            end
+        end
 
-    for _, ch in ipairs(startObj:GetChildren()) do
-        if ch:IsA("GuiButton") then
-            clicked = clickGuiElement(ch) or clicked
+        local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
+        if deepBtn and deepBtn ~= startObj then
+            clicked = clickGuiElement(deepBtn) or clicked
         end
     end
 
-    local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
-    if deepBtn and deepBtn ~= startObj then
-        clicked = clickGuiElement(deepBtn) or clicked
-    end
-
-    return clicked, "Clicked Start button successfully"
+    return clicked, "Level selected and locked successfully"
 end
 
 local function isNearStoryDoors()
