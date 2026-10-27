@@ -51,6 +51,10 @@ end)
 -- ── 1. Load Fluent UI Library ─────────────────────────────────────────────────
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 
+local function trim(s)
+    return tostring(s or ""):match("^%s*(.-)%s*$") or tostring(s or "")
+end
+
 -- ── 2. Config & State Management ──────────────────────────────────────────────
 local CONFIG_FILE = "auto_story_config.json"
 local LAST_MATCH_FILE = "last_story_match.json"
@@ -451,7 +455,7 @@ local LeaderInput = Tabs.Party:AddInput("LeaderInput", {
     Placeholder = "พิมพ์ Username ของหัวตี้...",
     Finished    = true,
     Callback    = function(val)
-        Config.LeaderUsername = val:strip()
+        Config.LeaderUsername = trim(val)
         saveConfig()
     end
 })
@@ -476,7 +480,7 @@ local WebhookInput = Tabs.Webhook:AddInput("WebhookInput", {
     Placeholder = "https://discord.com/api/webhooks/...",
     Finished    = true,
     Callback    = function(val)
-        Config.WebhookUrl = val:strip()
+        Config.WebhookUrl = trim(val)
         saveConfig()
     end
 })
