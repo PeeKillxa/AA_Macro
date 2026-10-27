@@ -349,6 +349,164 @@ local function findLeaderDoor(leaderName, targetMapName, targetAct)
     return nil
 end
 
+local function clickGuiElement(btn)
+    if not btn then return false end
+    local clicked = false
+
+    -- 1. firesignal
+    if typeof(firesignal) == "function" then
+        pcall(function()
+            if btn:IsA("GuiButton") or btn:FindFirstChild("Activated") then
+                firesignal(btn.Activated)
+                clicked = true
+            end
+        end)
+        pcall(function()
+            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Click") then
+                firesignal(btn.MouseButton1Click)
+                clicked = true
+            end
+        end)
+        pcall(function()
+            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Down") then
+                firesignal(btn.MouseButton1Down)
+                firesignal(btn.MouseButton1Up)
+                clicked = true
+            end
+        end)
+    end
+
+    -- 2. getconnections
+    if typeof(getconnections) == "function" then
+        pcall(function()
+            if btn:IsA("GuiButton") or btn:FindFirstChild("Activated") then
+                for _, conn in ipairs(getconnections(btn.Activated)) do
+                    if conn.Function or conn.Fire then
+                        conn:Fire()
+                        clicked = true
+                    end
+                end
+            end
+            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Click") then
+                for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do
+                    if conn.Function or conn.Fire then
+                        conn:Fire()
+                        clicked = true
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 3. VirtualInputManager (Simulated Hardware Mouse Click)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local absPos = btn.AbsolutePosition
+        local absSize = btn.AbsoluteSize
+        if absSize.X > 0 and absSize.Y > 0 then
+            local x = absPos.X + absSize.X / 2
+            local y = absPos.Y + absSize.Y / 2
+            vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
+            task.wait(0.04)
+            vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
+            clicked = true
+        end
+    end)
+
+    -- 4. VirtualUser fallback
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        local absPos = btn.AbsolutePosition
+        local absSize = btn.AbsoluteSize
+        if absSize.X > 0 and absSize.Y > 0 then
+            local center = Vector2.new(absPos.X + absSize.X / 2, absPos.Y + absSize.Y / 2)
+            vu:ClickButton1(center)
+            clicked = true
+        end
+    end)
+
+    return clicked
+end
+
+-- กดปุ่ม START : game:GetService("Players").LocalPlayer.PlayerGui.LevelSelectGui.Buttons.Start
+local function pressStartButton(target)
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pGui then return false, "PlayerGui not found" end
+
+    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 3 วินาที)
+    local lvlGui = pGui:FindFirstChild("LevelSelectGui")
+    local t0 = tick()
+    while not lvlGui and (tick() - t0 < 3) do
+        task.wait(0.2)
+        lvlGui = pGui:FindFirstChild("LevelSelectGui")
+    end
+
+    if not lvlGui then
+        return false, "LevelSelectGui not found in PlayerGui"
+    end
+
+    -- 1. ถ้ามีข้อมูล target ลองเลือกแมพและระดับ Act ให้ตรงใน UI ก่อนกด Start
+    if target and target.mapId then
+        pcall(function()
+            local container = getLevelSelectContainer()
+            if container then
+                local mapCard = container:FindFirstChild(target.mapId)
+                if mapCard then
+                    local btn = mapCard:IsA("GuiButton") and mapCard or mapCard:FindFirstChildWhichIsA("GuiButton", true)
+                    if btn then
+                        clickGuiElement(btn)
+                        task.wait(0.2)
+                    end
+                end
+            end
+
+            if target.act then
+                local actTargetStr = "act " .. tostring(target.act)
+                for _, desc in ipairs(lvlGui:GetDescendants()) do
+                    if desc:IsA("GuiButton") then
+                        local txt = desc:IsA("TextButton") and desc.Text:lower() or desc.Name:lower()
+                        if txt == actTargetStr or txt == tostring(target.act) then
+                            clickGuiElement(desc)
+                            task.wait(0.1)
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 2. ค้นหาปุ่ม Start ใน LevelSelectGui.Buttons.Start
+    local buttons = lvlGui:FindFirstChild("Buttons")
+    local startObj = buttons and buttons:FindFirstChild("Start")
+    if not startObj then
+        startObj = lvlGui:FindFirstChild("Start", true)
+    end
+
+    if not startObj then
+        return false, "Start button not found in LevelSelectGui.Buttons.Start"
+    end
+
+    -- 3. ยิงคำสั่งคลิกทุกวิธี (firesignal, getconnections, VIM, VirtualUser)
+    local clicked = false
+    if startObj:IsA("GuiButton") then
+        clicked = clickGuiElement(startObj) or clicked
+    end
+
+    for _, ch in ipairs(startObj:GetChildren()) do
+        if ch:IsA("GuiButton") then
+            clicked = clickGuiElement(ch) or clicked
+        end
+    end
+
+    local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
+    if deepBtn and deepBtn ~= startObj then
+        clicked = clickGuiElement(deepBtn) or clicked
+    end
+
+    return clicked, "Clicked Start button successfully"
+end
+
 local function lockDoorLevel(doorModelName, levelId, friendsOnly, difficulty)
     local remote = ReplicatedStorage:FindFirstChild("endpoints")
         and ReplicatedStorage.endpoints:FindFirstChild("client_to_server")
@@ -443,6 +601,19 @@ ModeDropdown:OnChanged(function(val)
     saveConfig()
     updateUIStatus(State.CurrentStatus)
 end)
+
+Tabs.Dashboard:AddButton({
+    Title       = "▶️ บังคับกดปุ่ม START ทันที (Force Click Start)",
+    Description = "คลิกปุ่ม LevelSelectGui.Buttons.Start ด้วยตนเอง",
+    Callback    = function()
+        local ok, msg = pressStartButton(nil)
+        Fluent:Notify({
+            Title    = "Force Click Start",
+            Content  = ok and "กดปุ่ม START สำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
+            Duration = 3
+        })
+    end
+})
 
 -- ── Party Mode Tab ────────────────────────────────────────────────────────────
 Tabs.Party:AddSection("👥 PARTY MODE SETTINGS")
@@ -625,17 +796,31 @@ local function handleLobbyProgression()
         end
         task.wait(1.5)
 
-        -- Lock the target story level
-        updateUIStatus("LOCKING LEVEL", string.format("ล็อค %s Act %d", target.mapName, target.act))
-        local locked, err = lockDoorLevel(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
+        -- Lock the target story level & Click Start Button
+        updateUIStatus("STARTING LEVEL", string.format("เลือก %s Act %d และกดปุ่ม START...", target.mapName, target.act))
 
-        if not locked then
-            warn("[AutoStory] Lock failed: " .. tostring(err))
+        -- Try firing remote as backup (non-blocking)
+        pcall(function()
+            lockDoorLevel(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
+        end)
+
+        -- Click the START button (LevelSelectGui.Buttons.Start) with retries
+        local startDone = false
+        for attempt = 1, 4 do
+            local ok, msg = pressStartButton(target)
+            if ok then
+                startDone = true
+                print(string.format("[AutoStory] 🟢 Press Start attempt #%d success: %s", attempt, tostring(msg)))
+                break
+            else
+                print(string.format("[AutoStory] ⚠️ Press Start attempt #%d: %s, retrying...", attempt, tostring(msg)))
+                task.wait(0.5)
+            end
         end
 
         -- If Solo Mode, let timer count down and start
         if Config.Mode == "Solo" then
-            updateUIStatus("READY", "ล็อคด่านเรียบร้อย กำลังรอเทเลพอร์ตเข้าแมพ...")
+            updateUIStatus("READY", "กด START เรียบร้อย กำลังรอเทเลพอร์ตเข้าแมพ...")
             task.wait(5)
             isProcessing = false
             return
@@ -650,6 +835,8 @@ local function handleLobbyProgression()
 
             if currentPlayers >= Config.PartySize then
                 updateUIStatus("PARTY FULL", "สมาชิกครบแล้ว! รอตัวเกมเริ่มต้น...")
+                -- Ensure Start button is clicked once more when full if needed
+                pcall(function() pressStartButton(target) end)
                 task.wait(3)
                 break
             end
