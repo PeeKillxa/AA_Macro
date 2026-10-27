@@ -1,12 +1,13 @@
 -- ==============================================================================
--- ⚔️ ANIME ADVENTURES AUTO STORY PROGRESSION & PARTY ENGINE (v1.0)
+-- ⚔️ ANIME ADVENTURES AUTO STORY PROGRESSION & PARTY ENGINE (v2.0 OVERHAUL)
 -- Developed by: cook45 & clack
 -- File: AA_Macro/auto_story.lua
 -- Features:
---   • Auto latest story level detection (Maps & Act 1 to 6)
---   • Party Mode Support (Host / Leader & Member / Follower & Solo)
---   • Discord Webhook Notifications (Act 6 Completed & All Stories Finished)
---   • Modern Fluent UI with Live Dashboard & Persistent JSON Config
+--   • Cached Memory & Profile Data Story Progression Scanner (Zero GC Lag)
+--   • Dual-Engine Level Lock & Start (UI + Direct Remote Invoke Failsafe)
+--   • Single-Signal Precision GUI Clicker (No Double-Click / No UI Desync)
+--   • Party Mode Support (Host / Leader, Member / Follower, & Solo)
+--   • Accurate ACT 6 & All-Story Discord Webhook Notifications
 -- ==============================================================================
 
 local Players           = game:GetService("Players")
@@ -20,8 +21,6 @@ local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local LOBBY_PLACE_ID = 8304191830
 
 -- ── Lobby Guard Check ─────────────────────────────────────────────────────────
--- ตรวจสอบว่าอยู่ใน Lobby หรือไม่ (PlaceId: 8304191830 หรือมีโฟลเดอร์ _LOBBIES.Story)
--- ถ้าอยู่ในด่านเล่นเกม (Match / Game) สคริปต์จะหยุดการทำงานทันที (ไม่เปิด UI, ไม่รันในแมพ)
 local function isLobby()
     if game.PlaceId == LOBBY_PLACE_ID then return true end
     if Workspace:FindFirstChild("_LOBBIES") and Workspace._LOBBIES:FindFirstChild("Story") then
@@ -31,9 +30,10 @@ local function isLobby()
 end
 
 if not isLobby() then
-    print("[AA Auto Story] 🛑 Not in Lobby (PlaceId: " .. tostring(game.PlaceId) .. "). Script will ONLY run in Lobby!")
+    print("[AA Auto Story] 🛑 Not in Lobby (PlaceId: " .. tostring(game.PlaceId) .. "). Script runs in Lobby only.")
     return
 end
+
 local gethui = gethui or function() return game:GetService("CoreGui") end
 if _G.AA_AutoStoryUI and typeof(_G.AA_AutoStoryUI.Destroy) == "function" then
     pcall(function() _G.AA_AutoStoryUI:Destroy() end)
@@ -56,7 +56,7 @@ local function trim(s)
 end
 
 -- ── 2. Config & State Management ──────────────────────────────────────────────
-local CONFIG_FILE = "auto_story_config.json"
+local CONFIG_FILE     = "auto_story_config.json"
 local LAST_MATCH_FILE = "last_story_match.json"
 
 local Config = {
@@ -65,12 +65,12 @@ local Config = {
     PartySize          = 2,             -- Target party member count
     LeaderUsername     = "",            -- For Party Member to track & follow
     FriendsOnly        = false,         -- Door locks only for friends
-    Difficulty         = "Normal",      -- "Normal" for Story progression
+    Difficulty         = "Normal",      -- "Normal" or "Hard"
+    SelectDelay        = 3.5,           -- Delay before clicking Select button
     WebhookUrl         = "https://discord.com/api/webhooks/1564605032517869601/JFLes7jR2Z44H3vDdnZ10GmBKn-qTd0JOibxDNGuRh3L9U74c3a4SLiAATfvZYV893CQ",
     NotifyAct6         = true,
     NotifyAllCompleted = true,
-    AutoReplayOrNext   = true,
-    CheckInterval      = 3.0,
+    CheckInterval      = 2.5,
     DoorWaitTimeout    = 60,
 }
 
@@ -86,8 +86,11 @@ local State = {
     PartyCount         = 0,
     TotalRuns          = 0,
     Act6ClearedCount   = 0,
-    InGame             = (game.PlaceId ~= LOBBY_PLACE_ID),
 }
+
+-- Forward declarations (ป้องกันบั๊กเรียกฟังก์ชันก่อนประกาศ 100%)
+local updateUIStatus
+local updateUITarget
 
 -- Load saved config
 pcall(function()
@@ -125,7 +128,7 @@ local function sendWebhook(title, description, color, fields)
                         color = color or 0x00FF88,
                         fields = fields or {},
                         footer = {
-                            text = "AA Auto Story Studio • Developed by cook45 & clack",
+                            text = "AA Auto Story Studio v2.0 • Developed by cook45 & clack",
                             icon_url = "https://raw.githubusercontent.com/PeeKillxa/AA_Macro/main/logo.png"
                         },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -142,7 +145,7 @@ local function sendWebhook(title, description, color, fields)
     end)
 end
 
--- ── 4. Character & Spatial Helpers ───────────────────────────────────────────
+-- ── 4. Character & Spatial Helpers ────────────────────────────────────────────
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 end
@@ -152,17 +155,55 @@ local function getRoot()
     return char and (char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 5))
 end
 
-local function teleportTo(cf)
-    local root = getRoot()
-    if root then
-        root.CFrame = cf
-        task.wait(0.1)
-    end
+local function getEndpoints()
+    local ep = ReplicatedStorage:FindFirstChild("endpoints")
+    return ep and ep:FindFirstChild("client_to_server")
 end
 
--- ── 5. Story Progress Scanner (DOM UI Inspector) ──────────────────────────────
+-- ── 5. Cached Memory & UI Story Progress Scanner ──────────────────────────────
+local cachedProfileData = nil
+local cachedLoaderModules = nil
+
+local function getProfileLevelData()
+    if cachedProfileData and type(cachedProfileData) == "table" and rawget(cachedProfileData, "level_data") then
+        return cachedProfileData.level_data
+    end
+    if not getgc then return nil end
+
+    for _, obj in ipairs(getgc(true)) do
+        if type(obj) == "table" then
+            local ld = rawget(obj, "level_data")
+            if type(ld) == "table" and rawget(ld, "completed_story_levels") then
+                cachedProfileData = obj
+                return ld
+            end
+        end
+    end
+    return nil
+end
+
+local function getGameStoryModules()
+    if cachedLoaderModules then return cachedLoaderModules end
+    local ok, mods = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then return nil end
+        local Loader = require(loaderModule)
+        return {
+            ProgressionServiceCore = Loader.load_core_service(nil, "ProgressionServiceCore"),
+            Worlds                 = Loader.load_data(nil, "Worlds"),
+            WorldLevelOrder        = Loader.load_data(nil, "WorldLevelOrder"),
+        }
+    end)
+    if ok and mods and mods.Worlds and mods.WorldLevelOrder then
+        cachedLoaderModules = mods
+        return mods
+    end
+    return nil
+end
+
 local function getLevelSelectContainer()
-    local pGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+    local pGui = LocalPlayer:WaitForChild("PlayerGui", 5)
     if not pGui then return nil end
     local lvlGui = pGui:FindFirstChild("LevelSelectGui")
     if not lvlGui then return nil end
@@ -173,115 +214,121 @@ local function getLevelSelectContainer()
 end
 
 local function scanStoryProgress()
-    -- 1. ระบบหลัก: ดึงข้อมูลความคืบหน้าตรงจาก Memory & Profile Data ของเกม (ไม่ต้องรอเปิดประตู UI)
+    -- 1. ระบบหลัก: ดึงจาก Cached Profile Data ใน Memory (ไม่กระตุก ไม่ต้องเปิดประตู)
     local ok, memTarget = pcall(function()
-        local rs = game:GetService("ReplicatedStorage")
-        local src = rs:FindFirstChild("src")
-        local loaderModule = src and src:FindFirstChild("Loader")
-        if not loaderModule then return nil end
+        local lvlData = getProfileLevelData()
+        local mods = getGameStoryModules()
+        if not lvlData or not mods then return nil end
 
-        local Loader = require(loaderModule)
-        local ProgressionServiceCore = Loader.load_core_service(nil, "ProgressionServiceCore")
-        local Worlds = Loader.load_data(nil, "Worlds")
-        local WorldLevelOrder = Loader.load_data(nil, "WorldLevelOrder")
-
-        local session = nil
-        if getgc then
-            for _, obj in ipairs(getgc(true)) do
-                if type(obj) == "table" and rawget(obj, "level_data") and rawget(obj.level_data, "completed_story_levels") then
-                    session = { profile_data = obj }
-                    break
-                end
-            end
-        end
-
-        if not session or not session.profile_data or not session.profile_data.level_data then
-            return nil
-        end
-
-        local lvlData = session.profile_data.level_data
         local completedLevels = lvlData.completed_story_levels or {}
-        local storyOrder = WorldLevelOrder and WorldLevelOrder.WORLD_ORDER or {}
+        local storyOrder = mods.WorldLevelOrder.WORLD_ORDER or {}
+        local allMaps = {}
+        local firstNextTarget = nil
 
-        for _, worldId in ipairs(storyOrder) do
-            local wInfo = Worlds and Worlds[worldId]
+        for idx, worldId in ipairs(storyOrder) do
+            local wInfo = mods.Worlds[worldId]
             if wInfo and not wInfo.legend_stage and not wInfo.raid_world then
-                local unlocked = ProgressionServiceCore.check_if_unlocked_world(lvlData, worldId)
-                if unlocked then
-                    local totalActs = 0
-                    local clearedActs = 0
-                    local levels = {}
-                    for k, lvl in pairs(wInfo.levels or {}) do
-                        if not lvl.is_infinite and not lvl.is_raid then
-                            totalActs = totalActs + 1
-                            local actNum = tonumber(k) or tonumber(lvl.id:match("%d+$")) or 1
-                            local c = completedLevels[lvl.id]
-                            local isCleared = (c and c.times_completed and c.times_completed > 0)
-                            if isCleared then
-                                clearedActs = clearedActs + 1
-                            end
-                            table.insert(levels, {
-                                act = actNum,
-                                id = lvl.id,
-                                cleared = isCleared
-                            })
+                local unlocked = mods.ProgressionServiceCore.check_if_unlocked_world(lvlData, worldId)
+                local totalActs = 0
+                local clearedActs = 0
+                local levels = {}
+
+                for k, lvl in pairs(wInfo.levels or {}) do
+                    if not lvl.is_infinite and not lvl.is_raid then
+                        totalActs = totalActs + 1
+                        local actNum = tonumber(k) or tonumber( tostring(lvl.id):match("_(%d+)$") ) or tonumber( tostring(lvl.id):match("(%d+)$") ) or totalActs
+                        local c = completedLevels[lvl.id]
+                        local isCleared = (c and c.times_completed and c.times_completed > 0) and true or false
+                        if isCleared then
+                            clearedActs = clearedActs + 1
+                        end
+                        table.insert(levels, {
+                            act     = actNum,
+                            id      = lvl.id,
+                            cleared = isCleared
+                        })
+                    end
+                end
+
+                table.sort(levels, function(a, b) return a.act < b.act end)
+
+                table.insert(allMaps, {
+                    id       = worldId,
+                    name     = wInfo.name or worldId,
+                    isLocked = not unlocked,
+                    cleared  = clearedActs,
+                    total    = totalActs > 0 and totalActs or 6,
+                    order    = idx
+                })
+
+                if unlocked and not firstNextTarget and clearedActs < totalActs then
+                    local nextActInfo = nil
+                    for _, l in ipairs(levels) do
+                        if not l.cleared then
+                            nextActInfo = l
+                            break
                         end
                     end
-
-                    table.sort(levels, function(a, b) return a.act < b.act end)
-
-                    if clearedActs < totalActs then
-                        local nextActInfo = nil
-                        for _, l in ipairs(levels) do
-                            if not l.cleared then
-                                nextActInfo = l
-                                break
-                            end
-                        end
-                        local actNum = nextActInfo and nextActInfo.act or (clearedActs + 1)
-                        local lvlId = nextActInfo and nextActInfo.id or string.format("%s_level_%d", worldId, actNum)
-                        return {
-                            completed = false,
-                            mapId     = worldId,
-                            mapName   = wInfo.name or worldId,
-                            act       = actNum,
-                            totalActs = totalActs,
-                            cleared   = clearedActs,
-                            levelId   = lvlId,
-                            isAct6    = (actNum == totalActs)
-                        }
-                    end
+                    local actNum = nextActInfo and nextActInfo.act or (clearedActs + 1)
+                    local lvlId = nextActInfo and nextActInfo.id or string.format("%s_level_%d", worldId, actNum)
+                    firstNextTarget = {
+                        completed = false,
+                        mapId     = worldId,
+                        mapName   = wInfo.name or worldId,
+                        act       = actNum,
+                        totalActs = totalActs,
+                        cleared   = clearedActs,
+                        levelId   = lvlId,
+                        isAct6    = (actNum == totalActs),
+                    }
                 end
             end
         end
 
-        return { completed = true }
+        if firstNextTarget then
+            firstNextTarget.allMaps = allMaps
+            return firstNextTarget
+        end
+
+        if #allMaps > 0 then
+            return {
+                completed = true,
+                allMaps   = allMaps
+            }
+        end
+        return nil
     end)
 
     if ok and memTarget then
-        return memTarget, "Profile Data Memory Scan"
+        return memTarget, "Profile Memory Scan"
     end
 
-    -- 2. ระบบสำรอง: สแกนจาก DOM LevelSelectGui เมื่อผู้เล่นเปิดหน้าต่างในประตู
+    -- 2. ระบบสำรอง: สแกนจาก DOM LevelSelectGui
     local container = getLevelSelectContainer()
     if not container then
-        return nil, "Waiting for LevelSelectGui.MapSelect.Main.Wrapper.Container..."
+        return nil, "Waiting for LevelSelectGui / Memory Profile..."
     end
 
     local maps = {}
     for _, child in ipairs(container:GetChildren()) do
         if child:IsA("GuiObject") and child:FindFirstChild("Main") then
             local mapId = child.Name
-            -- ตัด placeholder / ComingSoon ทิ้งเด็ดขาด
             if not mapId:lower():find("comingsoon") and not mapId:lower():find("placeholder") then
                 local main = child.Main
                 local mapContainer = main:FindFirstChild("Container")
                 local mapNameLabel = mapContainer and mapContainer:FindFirstChild("MapName")
                 local mapName = mapNameLabel and (mapNameLabel:IsA("TextLabel") and mapNameLabel.Text or mapNameLabel.Value) or mapId
 
-                -- ตรวจสอบจาก Frame Locked.Visible ตรงๆ (ถ้าเป็น false คือปลดล็อคแล้ว)
                 local lockedFrame = main:FindFirstChild("Locked")
-                local isLocked = lockedFrame and lockedFrame.Visible or false
+                local isLocked = false
+                if lockedFrame then
+                    local innerLocked = lockedFrame:FindFirstChild("locked")
+                    if innerLocked and innerLocked:IsA("GuiObject") then
+                        isLocked = innerLocked.Visible and lockedFrame.Visible
+                    else
+                        isLocked = lockedFrame.Visible
+                    end
+                end
 
                 local levelsObj = mapContainer and mapContainer:FindFirstChild("LevelsCleared") and mapContainer.LevelsCleared:FindFirstChild("V")
                 local clearedStr = levelsObj and (levelsObj:IsA("TextLabel") and levelsObj.Text or tostring(levelsObj.Value)) or "0/6"
@@ -312,24 +359,21 @@ local function scanStoryProgress()
         return nil, "Container has no map objects"
     end
 
-    -- Find first unlocked map that is not fully cleared
     for _, m in ipairs(maps) do
-        if not m.isLocked then
-            if m.cleared < m.total then
-                local nextAct = m.cleared + 1
-                local levelId = string.format("%s_level_%d", m.id, nextAct)
-                return {
-                    completed      = false,
-                    mapId          = m.id,
-                    mapName        = m.name,
-                    act            = nextAct,
-                    totalActs      = m.total,
-                    cleared        = m.cleared,
-                    levelId        = levelId,
-                    isAct6         = (nextAct == m.total),
-                    allMaps        = maps
-                }, "Found Next Story Level via UI"
-            end
+        if not m.isLocked and m.cleared < m.total then
+            local nextAct = m.cleared + 1
+            local levelId = string.format("%s_level_%d", m.id, nextAct)
+            return {
+                completed = false,
+                mapId     = m.id,
+                mapName   = m.name,
+                act       = nextAct,
+                totalActs = m.total,
+                cleared   = m.cleared,
+                levelId   = levelId,
+                isAct6    = (nextAct == m.total),
+                allMaps   = maps
+            }, "Found Next Story Level via UI"
         end
     end
 
@@ -339,14 +383,229 @@ local function scanStoryProgress()
     }, "All Available Stories Completed!"
 end
 
--- ── 6. Lobby Door Inspector & Controller ──────────────────────────────────────
+-- ── 6. Precision GUI Clicker & Remote Controllers ─────────────────────────────
+-- ยิงคลิกครั้งเดียวตามลำดับความแม่นยำ (ไม่ยิงซ้ำ 4 ระบบซ้อนกันจนปุ่มรวน)
+local function clickGuiElement(btn)
+    if not btn then return false end
+
+    -- 1. ลองใช้ firesignal ก่อน (เสถียรและไม่โดนหน้าต่างอื่นบัง)
+    if typeof(firesignal) == "function" then
+        local fired = false
+        pcall(function()
+            if btn:IsA("GuiButton") then
+                firesignal(btn.Activated)
+                firesignal(btn.MouseButton1Click)
+                fired = true
+            end
+        end)
+        if fired then return true end
+    end
+
+    -- 2. ลองใช้ getconnections หาก Executor ไม่มี firesignal
+    if typeof(getconnections) == "function" then
+        local fired = false
+        pcall(function()
+            if btn:IsA("GuiButton") then
+                for _, conn in ipairs(getconnections(btn.Activated)) do
+                    if conn.Function then
+                        task.spawn(conn.Function)
+                        fired = true
+                    elseif conn.Fire then
+                        conn:Fire()
+                        fired = true
+                    end
+                end
+                if not fired then
+                    for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do
+                        if conn.Function then
+                            task.spawn(conn.Function)
+                            fired = true
+                        elseif conn.Fire then
+                            conn:Fire()
+                            fired = true
+                        end
+                    end
+                end
+            end
+        end)
+        if fired then return true end
+    end
+
+    -- 3. Fallback สุดท้าย: VirtualInputManager (ชดเชย GuiInset 36px ให้ตรงตำแหน่งจริง)
+    local vimSuccess = false
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local inset = GuiService:GetGuiInset()
+        local absPos = btn.AbsolutePosition
+        local absSize = btn.AbsoluteSize
+        if absSize.X > 0 and absSize.Y > 0 then
+            local x = absPos.X + (absSize.X / 2)
+            local y = absPos.Y + (absSize.Y / 2) + inset.Y
+            vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
+            task.wait(0.05)
+            vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
+            vimSuccess = true
+        end
+    end)
+
+    return vimSuccess
+end
+
+-- ยิง Remote ล็อคด่านตรงเข้าเซิร์ฟเวอร์
+local function invokeLockDoorRemote(doorModelName, levelId, friendsOnly, difficulty)
+    local ep = getEndpoints()
+    local remote = ep and ep:FindFirstChild("request_lock_level")
+    if remote then
+        local ok, err = pcall(function()
+            remote:InvokeServer(
+                doorModelName,
+                levelId,
+                friendsOnly == true,
+                difficulty or "Normal"
+            )
+        end)
+        return ok, err
+    end
+    return false, "request_lock_level remote not found"
+end
+
+-- ยิง Remote เริ่มเกมตรงเข้าเซิร์ฟเวอร์ (ถ้ามี)
+local function invokeStartMatchRemote(doorModelName)
+    local ep = getEndpoints()
+    if not ep then return false end
+    local startRemote = ep:FindFirstChild("request_start_game") or ep:FindFirstChild("start_lobby")
+    if startRemote then
+        local ok = pcall(function()
+            startRemote:InvokeServer(doorModelName)
+        end)
+        return ok
+    end
+    return false
+end
+
+-- เลือกด่านใน UI + รอดีเลย์ + กดปุ่ม Select + ยิง Remote กำกับความชัวร์ 100%
+local function lockStoryLevelInUI(target, doorModelName)
+    if not target or not target.mapId then
+        return false, "Invalid target table"
+    end
+
+    -- 1. ยิง Remote request_lock_level นำร่องก่อนเลย (เผื่อ UI โหลดช้า)
+    if doorModelName and target.levelId then
+        invokeLockDoorRemote(doorModelName, target.levelId, Config.FriendsOnly, Config.Difficulty)
+    end
+
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pGui then return false, "PlayerGui not found" end
+
+    local lvlGui = pGui:FindFirstChild("LevelSelectGui")
+    local t0 = tick()
+    while not lvlGui and (tick() - t0 < 4) do
+        task.wait(0.2)
+        lvlGui = pGui:FindFirstChild("LevelSelectGui")
+    end
+
+    if not lvlGui then
+        return true, "Locked via Remote (LevelSelectGui not open)"
+    end
+
+    local selectClicked = false
+
+    pcall(function()
+        -- ขั้นตอน A: กดเลือกการ์ดแมพใน MapSelect.Main.Wrapper.Container
+        local container = getLevelSelectContainer()
+        if container then
+            local mapCard = container:FindFirstChild(target.mapId)
+            if mapCard then
+                local btn = mapCard:IsA("GuiButton") and mapCard or mapCard:FindFirstChildWhichIsA("GuiButton", true)
+                if btn then
+                    clickGuiElement(btn)
+                    task.wait(0.6)
+                end
+            end
+        end
+
+        -- ขั้นตอน B: กดเลือกปุ่ม Act ใน LevelSelect.InfoFrame.LevelButtons
+        local levelSelect = lvlGui:FindFirstChild("LevelSelect")
+        local infoFrame = levelSelect and levelSelect:FindFirstChild("InfoFrame")
+        local lvlButtons = infoFrame and infoFrame:FindFirstChild("LevelButtons")
+        if lvlButtons then
+            local actButtons = {}
+            for _, b in ipairs(lvlButtons:GetChildren()) do
+                if b:IsA("GuiButton") and b.Visible then
+                    table.insert(actButtons, b)
+                end
+            end
+            table.sort(actButtons, function(a, b)
+                return (a.LayoutOrder or 0) < (b.LayoutOrder or 0)
+            end)
+            if target.act and actButtons[target.act] then
+                clickGuiElement(actButtons[target.act])
+                task.wait(0.5)
+            end
+        end
+
+        -- ขั้นตอน C: รอจังหวะให้ UI โหลดข้อมูลด่านครบตาม Config.SelectDelay (3.5s)
+        local delaySec = tonumber(Config.SelectDelay) or 3.5
+        if updateUIStatus then
+            updateUIStatus("WAITING SELECT", string.format("เลือก %s Act %d แล้ว... รอ %.1f วินาทีก่อนกด Select", tostring(target.mapName), tonumber(target.act) or 1, delaySec))
+        end
+        task.wait(delaySec)
+
+        -- ขั้นตอน D: กดปุ่ม Select ใน LevelSelect.Buttons.Select
+        local selectBtn = levelSelect and levelSelect:FindFirstChild("Buttons") and levelSelect.Buttons:FindFirstChild("Select")
+        if selectBtn and selectBtn.Visible then
+            local innerBtn = selectBtn:IsA("GuiButton") and selectBtn or selectBtn:FindFirstChildWhichIsA("GuiButton", true)
+            if innerBtn then
+                selectClicked = clickGuiElement(innerBtn)
+            end
+            task.wait(0.4)
+        end
+
+        -- ขั้นตอน E: ยิง Remote request_lock_level ซ้ำอีกครั้งเพื่อรับประกันว่าล็อคระดับด่านชัวร์ 100%
+        if doorModelName and target.levelId then
+            invokeLockDoorRemote(doorModelName, target.levelId, Config.FriendsOnly, Config.Difficulty)
+        end
+    end)
+
+    return selectClicked, selectClicked and "Clicked Select & Invoked Remote" or "Invoked Remote Lock"
+end
+
+-- กดปุ่ม START เริ่มเกม (ทั้ง UI + Remote)
+local function pressStartMatchButton(doorModelName)
+    local clicked = false
+
+    -- 1. ยิง Remote เริ่มเกม (ถ้ามี)
+    if doorModelName then
+        if invokeStartMatchRemote(doorModelName) then
+            clicked = true
+        end
+    end
+
+    -- 2. กดปุ่ม LevelSelectGui.Buttons.Start บน UI
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local lvlGui = pGui and pGui:FindFirstChild("LevelSelectGui")
+    if lvlGui then
+        local buttons = lvlGui:FindFirstChild("Buttons")
+        local startObj = buttons and buttons:FindFirstChild("Start") or lvlGui:FindFirstChild("Start", true)
+        if startObj then
+            local targetBtn = startObj:IsA("GuiButton") and startObj or startObj:FindFirstChildWhichIsA("GuiButton", true)
+            if targetBtn then
+                clicked = clickGuiElement(targetBtn) or clicked
+            end
+        end
+    end
+
+    return clicked, clicked and "Triggered Start Match" or "Start button not found"
+end
+
+-- ── 7. Lobby Door Inspector & Movement Controller ─────────────────────────────
 local function getStoryLobbies()
     local lobbies = Workspace:FindFirstChild("_LOBBIES")
     return lobbies and lobbies:FindFirstChild("Story")
 end
 
 local function getDoorInfo(doorModel)
-    local door = doorModel:FindFirstChild("Door")
+    local door = doorModel and doorModel:FindFirstChild("Door")
     if not door then return nil end
     local surface = door:FindFirstChild("Surface")
     local status = surface and surface:FindFirstChild("Status") and surface.Status:FindFirstChild("State")
@@ -359,17 +618,18 @@ local function getDoorInfo(doorModel)
     local lvlText    = lvl and (lvl:IsA("TextLabel") and lvl.Text or tostring(lvl.Value)) or ""
     local diffText   = diff and (diff:IsA("TextLabel") and diff.Text or tostring(diff.Value)) or ""
 
+    local lowerStatus = statusText:lower()
     return {
-        model      = doorModel,
-        door       = door,
-        cframe     = door.CFrame,
-        statusText = statusText,
-        mapText    = mapText,
-        lvlText    = lvlText,
-        diffText   = diffText,
-        isEmpty    = (statusText == "Empty" or statusText:lower():find("empty") ~= nil),
-        isWaiting  = (statusText == "Waiting for players..." or statusText:lower():find("waiting") ~= nil),
-        isSelecting= (statusText == "Selecting..." or statusText:lower():find("selecting") ~= nil),
+        model       = doorModel,
+        door        = door,
+        cframe      = door.CFrame,
+        statusText  = statusText,
+        mapText     = mapText,
+        lvlText     = lvlText,
+        diffText    = diffText,
+        isEmpty     = (statusText == "Empty" or lowerStatus:find("empty") ~= nil),
+        isWaiting   = (statusText == "Waiting for players..." or lowerStatus:find("waiting") ~= nil),
+        isSelecting = (statusText == "Selecting..." or lowerStatus:find("selecting") ~= nil),
     }
 end
 
@@ -400,7 +660,7 @@ end
 
 local function findLeaderPlayer(leaderInput)
     if not leaderInput or #leaderInput == 0 then return nil end
-    local clean = leaderInput:gsub("^@", ""):lower()
+    local clean = trim(leaderInput):gsub("^@", ""):lower()
     for _, p in ipairs(Players:GetPlayers()) do
         if p.Name:lower() == clean or p.DisplayName:lower() == clean then
             return p
@@ -421,14 +681,12 @@ local function findLeaderDoor(leaderName, targetMapName, targetAct)
         for _, doorModel in ipairs(story:GetChildren()) do
             local info = getDoorInfo(doorModel)
             if info and (info.door.Position - leaderHrp.Position).Magnitude <= 14 then
-                -- หัวห้องอยู่ในประตูนี้! ตรวจสอบว่าหัวห้องเลือกด่านเสร็จหรือยัง:
                 if info.isSelecting then
                     return info, "SELECTING"
                 end
                 if info.isEmpty then
                     return info, "EMPTY"
                 end
-                -- ถ้าสถานะเป็น Waiting for players... หรือมี MapName/LevelName ล็อคแล้ว
                 if info.isWaiting or (#info.mapText > 0 and #info.lvlText > 0) then
                     return info, "READY"
                 end
@@ -442,8 +700,8 @@ local function findLeaderDoor(leaderName, targetMapName, targetAct)
     for _, doorModel in ipairs(story:GetChildren()) do
         local info = getDoorInfo(doorModel)
         if info and info.isWaiting and not info.isSelecting and not info.isEmpty then
-            local mapMatch = (targetMapName and info.mapText:lower():find(targetMapName:lower()) ~= nil)
-            local actMatch = (info.lvlText:lower():find(actPattern) ~= nil)
+            local mapMatch = (targetMapName and info.mapText:lower():find(targetMapName:lower(), 1, true) ~= nil)
+            local actMatch = (info.lvlText:lower():find(actPattern, 1, true) ~= nil)
             if mapMatch and actMatch then
                 return info, "READY"
             end
@@ -453,198 +711,19 @@ local function findLeaderDoor(leaderName, targetMapName, targetAct)
     return nil, "NOT_IN_DOOR"
 end
 
-local function clickGuiElement(btn)
-    if not btn then return false end
-    local clicked = false
-
-    -- 1. firesignal
-    if typeof(firesignal) == "function" then
-        pcall(function()
-            if btn:IsA("GuiButton") or btn:FindFirstChild("Activated") then
-                firesignal(btn.Activated)
-                clicked = true
-            end
-        end)
-        pcall(function()
-            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Click") then
-                firesignal(btn.MouseButton1Click)
-                clicked = true
-            end
-        end)
-        pcall(function()
-            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Down") then
-                firesignal(btn.MouseButton1Down)
-                firesignal(btn.MouseButton1Up)
-                clicked = true
-            end
-        end)
-    end
-
-    -- 2. getconnections
-    if typeof(getconnections) == "function" then
-        pcall(function()
-            if btn:IsA("GuiButton") or btn:FindFirstChild("Activated") then
-                for _, conn in ipairs(getconnections(btn.Activated)) do
-                    if conn.Function or conn.Fire then
-                        conn:Fire()
-                        clicked = true
-                    end
-                end
-            end
-            if btn:IsA("GuiButton") or btn:FindFirstChild("MouseButton1Click") then
-                for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do
-                    if conn.Function or conn.Fire then
-                        conn:Fire()
-                        clicked = true
-                    end
-                end
-            end
-        end)
-    end
-
-    -- 3. VirtualInputManager (Simulated Hardware Mouse Click)
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local absPos = btn.AbsolutePosition
-        local absSize = btn.AbsoluteSize
-        if absSize.X > 0 and absSize.Y > 0 then
-            local x = absPos.X + absSize.X / 2
-            local y = absPos.Y + absSize.Y / 2
-            vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
-            task.wait(0.04)
-            vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
-            clicked = true
-        end
-    end)
-
-    -- 4. VirtualUser fallback
-    pcall(function()
-        local vu = game:GetService("VirtualUser")
-        local absPos = btn.AbsolutePosition
-        local absSize = btn.AbsoluteSize
-        if absSize.X > 0 and absSize.Y > 0 then
-            local center = Vector2.new(absPos.X + absSize.X / 2, absPos.Y + absSize.Y / 2)
-            vu:ClickButton1(center)
-            clicked = true
-        end
-    end)
-
-    return clicked
-end
-
--- เลือกระดับด่านและกดปุ่ม Select : game.Players.LocalPlayer.PlayerGui.LevelSelectGui.LevelSelect.Buttons.Select
-local function lockStoryLevelInUI(target)
-    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pGui then return false, "PlayerGui not found" end
-
-    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 4 วินาที)
-    local lvlGui = pGui:FindFirstChild("LevelSelectGui")
-    local t0 = tick()
-    while not lvlGui and (tick() - t0 < 4) do
-        task.wait(0.2)
-        lvlGui = pGui:FindFirstChild("LevelSelectGui")
-    end
-
-    if not lvlGui then
-        return false, "LevelSelectGui not found in PlayerGui"
-    end
-
-    local clicked = false
-
-    -- 1. เลือกแมพใน MapSelect.Main.Wrapper.Container
-    if target and target.mapId then
-        pcall(function()
-            local container = getLevelSelectContainer()
-            if container then
-                local mapCard = container:FindFirstChild(target.mapId)
-                if mapCard then
-                    local btn = mapCard:IsA("GuiButton") and mapCard or mapCard:FindFirstChildWhichIsA("GuiButton", true)
-                    if btn then
-                        clickGuiElement(btn)
-                        clicked = true
-                        task.wait(0.5)
-                    end
-                end
-            end
-
-            -- 2. เลือกปุ่ม Act ภายใน LevelSelect.InfoFrame.LevelButtons
-            local levelSelect = lvlGui:FindFirstChild("LevelSelect")
-            if levelSelect and levelSelect:FindFirstChild("InfoFrame") and levelSelect.InfoFrame:FindFirstChild("LevelButtons") then
-                local actButtons = {}
-                for _, b in ipairs(levelSelect.InfoFrame.LevelButtons:GetChildren()) do
-                    if b:IsA("GuiButton") and b.LayoutOrder and b.LayoutOrder > 0 then
-                        table.insert(actButtons, b)
-                    end
-                end
-                table.sort(actButtons, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
-                if target.act and actButtons[target.act] then
-                    clickGuiElement(actButtons[target.act])
-                    clicked = true
-                    task.wait(0.5)
-                end
-            end
-
-            -- 3. เว้นจังหวะ 3.5 วินาที ตามที่ clack สั่ง เพื่อให้เกมโหลดแอนิเมชันและดาต้าพร้อม 100%
-            updateUIStatus("WAITING SELECT", string.format("เลือก %s Act %d แล้ว... รอ 3.5 วินาทีก่อนกด Select", target.mapName, target.act))
-            task.wait(3.5)
-
-            -- 4. กดปุ่ม Select ใน LevelSelect.Buttons.Select (ปุ่มล็อคด่านจริงของเกม)
-            local levelSelect = lvlGui:FindFirstChild("LevelSelect")
-            local selectBtn = levelSelect and levelSelect:FindFirstChild("Buttons") and levelSelect.Buttons:FindFirstChild("Select")
-            if selectBtn and selectBtn.Visible then
-                clickGuiElement(selectBtn)
-                clicked = true
-                task.wait(0.5)
-            end
-        end)
-    end
-
-    return clicked, "Level selected and locked via Select button"
-end
-
--- กดปุ่ม START : game:GetService("Players").LocalPlayer.PlayerGui.LevelSelectGui.Buttons.Start (สำหรับเริ่มแมตช์)
-local function pressStartMatchButton()
-    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-    local lvlGui = pGui and pGui:FindFirstChild("LevelSelectGui")
-    if not lvlGui then return false, "No LevelSelectGui" end
-
-    local buttons = lvlGui:FindFirstChild("Buttons")
-    local startObj = buttons and buttons:FindFirstChild("Start") or lvlGui:FindFirstChild("Start", true)
-    if not startObj then return false, "No Start button" end
-
-    local clicked = false
-    if startObj:IsA("GuiButton") then
-        clicked = clickGuiElement(startObj) or clicked
-    end
-
-    for _, ch in ipairs(startObj:GetChildren()) do
-        if ch:IsA("GuiButton") then
-            clicked = clickGuiElement(ch) or clicked
-        end
-    end
-
-    local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
-    if deepBtn and deepBtn ~= startObj then
-        clicked = clickGuiElement(deepBtn) or clicked
-    end
-
-    return clicked, "Clicked Start button successfully"
-end
-
 local function isNearStoryDoors()
     local root = getRoot()
     local story = getStoryLobbies()
     if not root or not story then return false end
     for _, doorModel in ipairs(story:GetChildren()) do
         local door = doorModel:FindFirstChild("Door")
-        if door and (door.Position - root.Position).Magnitude <= 20 then
+        if door and (door.Position - root.Position).Magnitude <= 35 then
             return true
         end
     end
     return false
 end
 
--- กดปุ่ม PLAY : game:GetService("Players").LocalPlayer.PlayerGui.LeftUI_test.Buttons.EventTeleport
 local function fastTravelToPlayZone()
     if isNearStoryDoors() then
         return true
@@ -655,48 +734,47 @@ local function fastTravelToPlayZone()
     local eventBtn = leftUI and leftUI:FindFirstChild("Buttons") and leftUI.Buttons:FindFirstChild("EventTeleport")
 
     if eventBtn then
-        print("[AutoStory] 📍 Clicking LeftUI_test.Buttons.EventTeleport (PLAY)...")
         clickGuiElement(eventBtn)
-        task.wait(1.5)
+        task.wait(1.2)
         return true
     end
     return false
 end
 
--- สั่งตัวละครเดินตรงเข้าประตูอย่างเป็นธรรมชาติ
-local function walkToDoor(doorPart)
+-- เดินเข้าประตูและแตะ TouchInterest ครั้งเดียวอย่างแม่นยำ
+local function enterDoor(doorPart, doorModelName)
     if not doorPart then return end
     local char = getCharacter()
     local root = getRoot()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
 
-    local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
-    local distXZ = (Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z)).Magnitude
+    local distXZ = Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z).Magnitude
 
-    -- ถ้าอยู่ไกลเกิน 35 studs ให้ CFrame มาตั้งหลักหน้าประตูก่อนที่ระยะ 8 studs
+    -- ถ้าอยู่ไกลเกิน 35 studs ให้วาร์ปมาหน้าประตูก่อนที่ระยะ 7 studs
     if distXZ > 35 then
-        root.CFrame = doorPart.CFrame * CFrame.new(0, 0, 8)
+        root.CFrame = doorPart.CFrame * CFrame.new(0, 0, 7)
         task.wait(0.15)
     end
 
-    -- สั่ง Humanoid เดินตรงเข้าหาประตู
+    -- เดินเข้าหาจุดศูนย์กลางประตู
+    local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
     local walkStart = tick()
-    while (tick() - walkStart) < 5 do
+    while (tick() - walkStart) < 4.5 do
         if not root or not hum or not doorPart then break end
-        local currentDist = (Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z)).Magnitude
-        if currentDist <= 3.0 then
+        local curDist = Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z).Magnitude
+        if curDist <= 2.8 then
             break
         end
         hum:MoveTo(targetPos)
         task.wait(0.1)
     end
 
-    -- ก้าวเข้าไปยืนในประตู
-    root.CFrame = doorPart.CFrame * CFrame.new(0, 0, -2)
+    -- ยืนตรงกลางประตูพอดี
+    root.CFrame = doorPart.CFrame
     task.wait(0.1)
 
-    -- สัมผัสประตู (FireTouchInterest)
+    -- แตะ TouchInterest
     if firetouchinterest then
         pcall(function()
             firetouchinterest(root, doorPart, 0)
@@ -704,29 +782,37 @@ local function walkToDoor(doorPart)
             firetouchinterest(root, doorPart, 1)
         end)
     end
+
+    -- หากมี Remote request_join_lobby ให้ยิงเสริมด้วย
+    if doorModelName then
+        pcall(function()
+            local ep = getEndpoints()
+            local joinRemote = ep and ep:FindFirstChild("request_join_lobby")
+            if joinRemote then
+                joinRemote:InvokeServer(doorModelName)
+            end
+        end)
+    end
 end
 
--- สั่งตัวละครเดินเข้าหาประตูเรื่อยๆ เพื่อรักษาตำแหน่งและป้องกันการหลุดออกจากห้อง
-local function keepWalkingInsideDoor(doorPart)
+-- รักษาตำแหน่งในประตูเฉพาะตอนที่ตัวละครไหลออกห่างเกิน 3.5 studs (ไม่ยิง TouchEnded รัวๆ จนหลุดห้อง)
+local function keepStandingInDoor(doorPart)
     if not doorPart then return end
     local char = getCharacter()
     local root = getRoot()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
 
-    local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
-    hum:MoveTo(targetPos)
-
-    if firetouchinterest then
-        pcall(function()
-            firetouchinterest(root, doorPart, 0)
-            task.wait(0.04)
-            firetouchinterest(root, doorPart, 1)
-        end)
+    local distXZ = Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z).Magnitude
+    if distXZ > 3.5 then
+        local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
+        hum:MoveTo(targetPos)
+        if distXZ > 7 then
+            root.CFrame = doorPart.CFrame
+        end
     end
 end
 
--- สั่งออกเข้าเกมใหม่ (Rejoin Server) เมื่อล็อคห้องไม่ผ่านเกิน 3 รอบ
 local function rejoinServer()
     local TeleportService = game:GetService("TeleportService")
 
@@ -741,40 +827,19 @@ local function rejoinServer()
 
     pcall(function()
         if #Players:GetPlayers() <= 1 then
-            LocalPlayer:Kick("\n[AA Auto Story] ล็อคห้องไม่ผ่าน 3 รอบ กำลัง Rejoin...")
-            task.wait(0.5)
             TeleportService:Teleport(game.PlaceId, LocalPlayer)
         else
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
         end
     end)
-
-    task.wait(3)
-    pcall(function()
-        TeleportService:Teleport(game.PlaceId, LocalPlayer)
-    end)
 end
 
-local function lockDoorLevel(doorModelName, levelId, friendsOnly, difficulty)
-    local remote = ReplicatedStorage:FindFirstChild("endpoints")
-        and ReplicatedStorage.endpoints:FindFirstChild("client_to_server")
-        and ReplicatedStorage.endpoints.client_to_server:FindFirstChild("request_lock_level")
-
-    if remote then
-        local success, err = pcall(function()
-            remote:InvokeServer(doorModelName, levelId, friendsOnly, difficulty or "Normal")
-        end)
-        return success, err
-    end
-    return false, "Remote endpoints.client_to_server.request_lock_level not found"
-end
-
--- ── 7. Fluent UI Creation ─────────────────────────────────────────────────────
+-- ── 8. Fluent UI Creation ─────────────────────────────────────────────────────
 local Window = Fluent:CreateWindow({
-    Title       = "AA Auto Story Studio",
-    SubTitle    = "by cook45 & clack | Party & Solo Edition",
+    Title       = "AA Auto Story Studio v2.0",
+    SubTitle    = "by cook45 & clack | Overhauled Party & Solo Engine",
     TabWidth    = 160,
-    Size        = UDim2.fromOffset(590, 440),
+    Size        = UDim2.fromOffset(590, 450),
     Acrylic     = true,
     Theme       = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -782,13 +847,12 @@ local Window = Fluent:CreateWindow({
 _G.AA_AutoStoryUI = Window
 
 local Tabs = {
-    Dashboard = Window:AddTab({ Title = "Dashboard", Icon = "home" }),
+    Dashboard = Window:AddTab({ Title = "Dashboard",  Icon = "home" }),
     Party     = Window:AddTab({ Title = "Party Mode", Icon = "users" }),
     Webhook   = Window:AddTab({ Title = "Webhook",    Icon = "bell" }),
     Settings  = Window:AddTab({ Title = "Settings",   Icon = "settings" })
 }
 
--- ── Dashboard Tab ─────────────────────────────────────────────────────────────
 Tabs.Dashboard:AddSection("⚡ LIVE PROGRESSION STATUS")
 
 local StatusParagraph = Tabs.Dashboard:AddParagraph({
@@ -801,26 +865,49 @@ local TargetCard = Tabs.Dashboard:AddParagraph({
     Content = "Scanning progression..."
 })
 
-local function updateUIStatus(status, details)
+updateUIStatus = function(status, details)
     State.CurrentStatus = status
-    local text = string.format("สถานะ: %s\nโหมด: %s | ประตู: %s\nผู้เล่นในตี้: %d/%d\nจบไปแล้ว: %d ด่าน (ACT 6: %d)",
-        status, Config.Mode, State.CurrentDoorName, State.PartyCount, Config.PartySize, State.TotalRuns, State.Act6ClearedCount)
-    if details then text = text .. "\n" .. details end
-    if StatusParagraph then StatusParagraph:SetDesc(text) end
+    local text = string.format(
+        "สถานะ: %s\nโหมด: %s | ประตู: %s\nผู้เล่นในตี้: %d/%d\nจบไปแล้ว: %d ด่าน (ACT 6: %d)",
+        tostring(status),
+        tostring(Config.Mode),
+        tostring(State.CurrentDoorName),
+        tonumber(State.PartyCount) or 0,
+        tonumber(Config.PartySize) or 1,
+        tonumber(State.TotalRuns) or 0,
+        tonumber(State.Act6ClearedCount) or 0
+    )
+    if details then text = text .. "\n" .. tostring(details) end
+    if StatusParagraph then
+        pcall(function() StatusParagraph:SetDesc(text) end)
+    end
 end
 
-local function updateUITarget(target)
+updateUITarget = function(target)
     if not target then
-        if TargetCard then TargetCard:SetDesc("✅ เคลียร์สตอรี่ครบทุกด่านแล้ว! (All Stories Cleared)") end
+        if TargetCard then
+            pcall(function() TargetCard:SetDesc("⏳ กำลังสแกนหาข้อมูลด่าน...") end)
+        end
         return
     end
     if target.completed then
-        if TargetCard then TargetCard:SetDesc("🏆 สตอรี่ทุกแมพเคลียร์ครบ 6/6 แล้วทั้งหมด!") end
+        if TargetCard then
+            pcall(function() TargetCard:SetDesc("🏆 สตอรี่ทุกแมพเคลียร์ครบ 6/6 แล้วทั้งหมด!") end)
+        end
         return
     end
-    local text = string.format("🗺️ แมพเป้าหมาย: %s (`%s`)\n⭐ ระดับ: Act %d / %d (%s)\n🔑 Level ID: `%s`",
-        target.mapName, target.mapId, target.act, target.totalActs, target.isAct6 and "🔥 บอสด่านสุดท้าย ACT 6" or "Normal", target.levelId)
-    if TargetCard then TargetCard:SetDesc(text) end
+    local text = string.format(
+        "🗺️ แมพเป้าหมาย: %s (`%s`)\n⭐ ระดับ: Act %d / %d (%s)\n🔑 Level ID: `%s`",
+        tostring(target.mapName),
+        tostring(target.mapId),
+        tonumber(target.act) or 1,
+        tonumber(target.totalActs) or 6,
+        target.isAct6 and "🔥 บอสด่านสุดท้าย ACT 6" or "Normal",
+        tostring(target.levelId)
+    )
+    if TargetCard then
+        pcall(function() TargetCard:SetDesc(text) end)
+    end
 end
 
 Tabs.Dashboard:AddSection("🎮 AUTOMATION CONTROLS")
@@ -851,27 +938,29 @@ ModeDropdown:OnChanged(function(val)
 end)
 
 Tabs.Dashboard:AddButton({
-    Title       = "🔒 บังคับกดปุ่ม SELECT ล็อคด่าน (Force Click Select)",
-    Description = "คลิกปุ่ม LevelSelectGui.LevelSelect.Buttons.Select เพื่อล็อคด่าน",
+    Title       = "🔒 บังคับกดปุ่ม SELECT ล็อคด่าน (Force Lock Level)",
+    Description = "ล็อคด่านเป้าหมายปัจจุบันผ่าน UI + Remote ทันที",
     Callback    = function()
         local target = State.TargetMapId and State.TargetMapId ~= "-" and {
-            mapId = State.TargetMapId,
-            act = State.TargetAct or 1
+            mapId   = State.TargetMapId,
+            mapName = State.TargetMapName,
+            act     = State.TargetAct or 1,
+            levelId = State.TargetLevelId
         } or nil
-        local ok, msg = lockStoryLevelInUI(target)
+        local ok, msg = lockStoryLevelInUI(target, State.CurrentDoorName ~= "-" and State.CurrentDoorName or nil)
         Fluent:Notify({
-            Title    = "Force Click Select",
-            Content  = ok and "กดปุ่ม Select ล็อคด่านสำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
+            Title    = "Force Lock Level",
+            Content  = ok and ("สำเร็จ: " .. tostring(msg)) or ("ผลลัพธ์: " .. tostring(msg)),
             Duration = 3
         })
     end
 })
 
 Tabs.Dashboard:AddButton({
-    Title       = "▶️ บังคับกดปุ่ม START ทันที (Force Click Start)",
-    Description = "คลิกปุ่ม LevelSelectGui.Buttons.Start เพื่อเริ่มแมตช์",
+    Title       = "▶️ บังคับกดปุ่ม START ทันที (Force Start Match)",
+    Description = "คลิกปุ่ม LevelSelectGui.Buttons.Start + ยิง Remote เริ่มแมตช์",
     Callback    = function()
-        local ok, msg = pressStartMatchButton()
+        local ok, msg = pressStartMatchButton(State.CurrentDoorName ~= "-" and State.CurrentDoorName or nil)
         Fluent:Notify({
             Title    = "Force Click Start",
             Content  = ok and "กดปุ่ม START สำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
@@ -887,7 +976,7 @@ Tabs.Dashboard:AddButton({
         local ok = fastTravelToPlayZone()
         Fluent:Notify({
             Title    = "PLAY Fast Travel",
-            Content  = ok and "กดปุ่ม PLAY วาร์ปสำเร็จ!" or "ไม่พบปุ่ม LeftUI_test.Buttons.EventTeleport",
+            Content  = ok and "วาร์ปไปโซนประตูสตอรี่สำเร็จ!" or "ไม่พบปุ่ม LeftUI_test.Buttons.EventTeleport",
             Duration = 3
         })
     end
@@ -912,7 +1001,7 @@ end)
 local LeaderInput = Tabs.Party:AddInput("LeaderInput", {
     Title       = "ชื่อ Party Leader (สำหรับลูกตี้ Follower)",
     Default     = Config.LeaderUsername,
-    Placeholder = "พิมพ์ Username ของหัวตี้...",
+    Placeholder = "พิมพ์ Username หรือ DisplayName ของหัวตี้...",
     Finished    = true,
     Callback    = function(val)
         Config.LeaderUsername = trim(val)
@@ -969,7 +1058,7 @@ Tabs.Webhook:AddButton({
     Callback    = function()
         sendWebhook(
             "🧪 [Anime Adventures] Webhook Test Successful!",
-            "ระบบแจ้งเตือนของสคริปต์ **AA Auto Story Studio** พร้อมใช้งานแล้ว!",
+            "ระบบแจ้งเตือนของสคริปต์ **AA Auto Story Studio v2.0** พร้อมใช้งานแล้ว!",
             0x00FF88,
             {
                 { name = "👤 ผู้เล่น", value = "`" .. LocalPlayer.Name .. "`", inline = true },
@@ -983,8 +1072,20 @@ Tabs.Webhook:AddButton({
 -- ── Settings Tab ──────────────────────────────────────────────────────────────
 Tabs.Settings:AddSection("⚙️ ADVANCED SETTINGS")
 
+local SelectDelaySlider = Tabs.Settings:AddSlider("SelectDelaySlider", {
+    Title    = "หน่วงเวลาก่อนกดปุ่ม Select (วินาที)",
+    Default  = Config.SelectDelay or 3.5,
+    Min      = 1.0,
+    Max      = 6.0,
+    Rounding = 1
+})
+SelectDelaySlider:OnChanged(function(val)
+    Config.SelectDelay = val
+    saveConfig()
+end)
+
 local IntervalSlider = Tabs.Settings:AddSlider("IntervalSlider", {
-    Title    = "ระยะห่างการตรวจสอบ (วินาที)",
+    Title    = "ระยะห่างการตรวจสอบลูปหลัก (วินาที)",
     Default  = Config.CheckInterval,
     Min      = 1,
     Max      = 10,
@@ -995,8 +1096,7 @@ IntervalSlider:OnChanged(function(val)
     saveConfig()
 end)
 
--- ── 8. Core Workflow Automation Engine ────────────────────────────────────────
-
+-- ── 9. Core Workflow Automation Engine ────────────────────────────────────────
 local isProcessing = false
 local doorLockFailCount = 0
 
@@ -1038,84 +1138,73 @@ local function handleLobbyProgression()
     State.IsAct6        = target.isAct6
     updateUITarget(target)
 
-    -- Save state for match reporting
+    -- บันทึกข้อมูลด่านปัจจุบันไว้เช็คตอนกลับออกมาหน้า Lobby ว่าผ่าน ACT 6 หรือไม่
     pcall(function()
         if writefile then
             writefile(LAST_MATCH_FILE, HttpService:JSONEncode({
                 mapId     = target.mapId,
                 mapName   = target.mapName,
                 act       = target.act,
+                levelId   = target.levelId,
                 isAct6    = target.isAct6,
                 timestamp = os.time()
             }))
         end
     end)
 
-    -- Case 2: Solo / Host Mode
+    -- Case 2: Solo / Party Leader (Host) Mode
     if Config.Mode == "Solo" or Config.Mode == "Party Leader (Host)" then
         isProcessing = true
 
-        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น
-        updateUIStatus("FAST TRAVEL", "กดปุ่ม PLAY (EventTeleport) วาร์ปไปโซนประตู...")
+        -- 1. วาร์ปไปโซนประตูสตอรี่ถ้าอยู่ไกล
+        updateUIStatus("FAST TRAVEL", "กำลังไปโซนประตูสตอรี่...")
         fastTravelToPlayZone()
 
         -- 2. ค้นหาประตูที่ว่าง
         updateUIStatus("SEARCHING DOOR", "กำลังหาประตูที่ว่าง (Empty)...")
         local doorInfo = findEmptyDoor()
         if not doorInfo then
-            updateUIStatus("WAITING DOOR", "ประตูเต็ม กำลังรอห้องว่าง...")
+            updateUIStatus("WAITING DOOR", "ประตูเต็มทุกห้อง กำลังรอห้องว่าง...")
             isProcessing = false
             return
         end
 
         State.CurrentDoorName = doorInfo.model.Name
-        updateUIStatus("WALKING TO DOOR", "กำลังเดินเข้าประตู " .. doorInfo.model.Name .. "...")
+        updateUIStatus("ENTERING DOOR", "กำลังเดินเข้าประตู " .. doorInfo.model.Name .. "...")
 
-        -- 3. เดินเข้าประตูอย่างเป็นธรรมชาติ
-        walkToDoor(doorInfo.door)
+        -- 3. เดินเข้าประตู
+        enterDoor(doorInfo.door, doorInfo.model.Name)
         task.wait(0.8)
 
-        -- 4. ล็อคระดับด่านด้วยปุ่ม Select (LevelSelectGui.LevelSelect.Buttons.Select)
-        updateUIStatus("LOCKING LEVEL", string.format("เลือก %s Act %d และกดปุ่ม Select...", target.mapName, target.act))
-
-        -- Backup remote invoke
-        pcall(function()
-            lockDoorLevel(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
-        end)
-
-        -- กดปุ่ม Select ใน LevelSelect.Buttons.Select
-        local lockDone = false
-        for attempt = 1, 3 do
-            local ok, msg = lockStoryLevelInUI(target)
-            if ok then
-                lockDone = true
-                print(string.format("[AutoStory] 🟢 Lock level attempt #%d success: %s", attempt, tostring(msg)))
+        -- 4. ล็อคระดับด่าน (ผ่านทั้ง UI และ Remote request_lock_level)
+        updateUIStatus("LOCKING LEVEL", string.format("กำลังล็อคด่าน %s Act %d...", target.mapName, target.act))
+        for attempt = 1, 2 do
+            lockStoryLevelInUI(target, doorInfo.model.Name)
+            local curInfo = getDoorInfo(doorInfo.model)
+            if curInfo and (curInfo.isWaiting or (#curInfo.mapText > 0 and #curInfo.lvlText > 0 and not curInfo.isSelecting)) then
                 break
-            else
-                print(string.format("[AutoStory] ⚠️ Lock level attempt #%d: %s, retrying...", attempt, tostring(msg)))
-                task.wait(0.5)
             end
+            task.wait(0.6)
         end
 
-        -- 5. ตรวจสอบสถานะป้ายหน้าห้องว่าเปลี่ยนเป็น "Waiting for players..." หรือไม่
+        -- 5. ตรวจสอบว่าสถานะหน้าประตูเปลี่ยนเป็น "Waiting for players..." แล้วหรือยัง
         updateUIStatus("VERIFYING DOOR", "ตรวจสอบสถานะประตู (Waiting for players...)...")
         local verifiedWaiting = false
         local checkStart = tick()
         while tick() - checkStart < 6 do
             local curInfo = getDoorInfo(doorInfo.model)
-            if curInfo and (curInfo.isWaiting or (#curInfo.mapText > 0 and #curInfo.lvlText > 0 and not curInfo.isSelecting)) then
+            if curInfo and (curInfo.isWaiting or (#curInfo.mapText > 0 and #curInfo.lvlText > 0 and not curInfo.isSelecting and not curInfo.isEmpty)) then
                 verifiedWaiting = true
                 break
             end
-            task.wait(0.5)
+            invokeLockDoorRemote(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
+            task.wait(0.6)
         end
 
-        -- ถ้าสถานะไม่ขึ้น Waiting for players...
         if not verifiedWaiting then
             doorLockFailCount = doorLockFailCount + 1
             warn(string.format("[AutoStory] ⚠️ Door status is NOT waiting for players! Attempt %d/3", doorLockFailCount))
 
-            -- ถ้าไม่ได้จริงๆ เกิน 3 รอบ สั่งออกเข้าใหม่เลย!
             if doorLockFailCount >= 3 then
                 updateUIStatus("REJOINING", "ล็อคห้องไม่ผ่านครบ 3 รอบ! กำลัง Rejoin เซิร์ฟเวอร์ใหม่...")
                 task.wait(1.5)
@@ -1124,64 +1213,61 @@ local function handleLobbyProgression()
                 return
             end
 
-            -- ถอยหลังออกจากประตู แล้วเริ่มทำใหม่แต่แรก
-            updateUIStatus("RETRYING", string.format("สถานะไม่ขึ้น Waiting for players (รอบ %d/3) ก้าวออกมาเริ่มใหม่...", doorLockFailCount))
+            updateUIStatus("RETRYING", string.format("ล็อคห้องไม่ติด (รอบ %d/3) ถอยออกมาตั้งหลักใหม่...", doorLockFailCount))
             local root = getRoot()
             if root and doorInfo and doorInfo.door then
-                root.CFrame = doorInfo.door.CFrame * CFrame.new(0, 0, 16)
+                root.CFrame = doorInfo.door.CFrame * CFrame.new(0, 0, 15)
             end
-            task.wait(2.0)
+            task.wait(1.8)
             isProcessing = false
             return
         end
 
-        -- ถ้าล็อคห้องสำเร็จ รีเซ็ตตัวนับล้มเหลว
         doorLockFailCount = 0
 
-        -- If Solo Mode: ไม่มีเพื่อนต้องรอ กด START เริ่มเกมทันที!
+        -- โหมด Solo: กด START ทันที
         if Config.Mode == "Solo" then
-            updateUIStatus("STARTING SOLO", "ล็อคด่านแล้ว กำลังกดปุ่ม START...")
-            task.wait(0.5)
+            updateUIStatus("STARTING SOLO", "ล็อคด่านสำเร็จ! กำลังกดปุ่ม START...")
+            task.wait(0.4)
             for attempt = 1, 3 do
-                local ok = pressStartMatchButton()
+                local ok = pressStartMatchButton(doorInfo.model.Name)
                 if ok then break end
                 task.wait(0.5)
             end
-            updateUIStatus("READY", "กด START เรียบร้อย กำลังรอเทเลพอร์ตเข้าแมพ...")
+            updateUIStatus("TELEPORTING", "กด START เรียบร้อย กำลังรอวาร์ปเข้าด่าน...")
             task.wait(5)
             isProcessing = false
             return
         end
 
-        -- If Party Leader Mode: ล็อคด่านเสร็จแล้ว เดินเข้าหาประตูเรื่อยๆ ยืนรอเพื่อนร่วมตี้เข้ามา!
-        updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว เดินเลี้ยงในห้องรอเพื่อน (1/%d คน)...", Config.PartySize))
+        -- โหมด Party Leader (Host): ยืนนิ่งๆ ในประตูรอเพื่อนครบตามจำนวน PartySize แล้วค่อยกด START
+        updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว รอเพื่อนเข้าประตู (1/%d คน)...", Config.PartySize))
 
         local waitStart = tick()
         while tick() - waitStart < Config.DoorWaitTimeout do
-            -- เดินเข้าหาประตูเรื่อยๆ เพื่อไม่ให้หลุดและรักษาการสัมผัสประตูตลอดเวลา
-            keepWalkingInsideDoor(doorInfo.door)
+            if not Config.Enabled then break end
+            keepStandingInDoor(doorInfo.door)
 
             local currentPlayers = countPlayersInDoor(doorInfo.door)
             State.PartyCount = currentPlayers
             updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว รอเพื่อนร่วมตี้ (%d/%d คน)", currentPlayers, Config.PartySize))
 
-            -- พอเพื่อนมาครบตามจำนวนตี้ ค่อยกด START!
             if currentPlayers >= Config.PartySize then
                 updateUIStatus("PARTY FULL", "สมาชิกครบแล้ว! กำลังกดปุ่ม START...")
-                task.wait(0.8)
+                task.wait(0.6)
                 for attempt = 1, 4 do
-                    keepWalkingInsideDoor(doorInfo.door)
-                    local ok, msg = pressStartMatchButton()
+                    keepStandingInDoor(doorInfo.door)
+                    local ok = pressStartMatchButton(doorInfo.model.Name)
                     if ok then
-                        print(string.format("[AutoStory] 🟢 Party full -> Pressed START attempt #%d!", attempt))
+                        print(string.format("[AutoStory] 🟢 Party full -> Triggered START (attempt #%d)", attempt))
                         break
                     end
                     task.wait(0.5)
                 end
-                task.wait(3)
+                task.wait(4)
                 break
             end
-            task.wait(0.8)
+            task.wait(0.6)
         end
 
         isProcessing = false
@@ -1190,55 +1276,48 @@ local function handleLobbyProgression()
     elseif Config.Mode == "Party Member (Follower)" then
         isProcessing = true
 
-        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น (แต่ยังไม่เดินเข้าประตู)
-        updateUIStatus("FAST TRAVEL", "กดปุ่ม PLAY (EventTeleport) วาร์ปไปโซนประตู...")
         fastTravelToPlayZone()
 
-        -- 2. ค้นหาประตูของหัวตี้ และตรวจสอบว่าหัวห้องเลือกด่านเสร็จหรือยัง
-        updateUIStatus("CHECKING LEADER", "กำลังเช็คสถานะห้องของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
+        updateUIStatus("CHECKING LEADER", "กำลังเช็คประตูของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
         local doorInfo, statusReason = findLeaderDoor(Config.LeaderUsername, target.mapName, target.act)
 
-        -- ถ้าลูกตี้ยืนอยู่ในประตูของหัวตี้อยู่แล้ว ให้เดินเลี้ยงตำแหน่งเข้าหาประตูเรื่อยๆ
         if doorInfo and doorInfo.door then
             local root = getRoot()
             if root and (root.Position - doorInfo.door.Position).Magnitude <= 10 then
                 State.CurrentDoorName = doorInfo.model.Name
-                updateUIStatus("IN LOBBY DOOR", "อยู่ในประตู เดินเลี้ยงรอหัวห้องกดเริ่ม...")
-                keepWalkingInsideDoor(doorInfo.door)
+                updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูกับหัวตี้แล้ว รอหัวตี้กดเริ่มเกม...")
+                keepStandingInDoor(doorInfo.door)
                 task.wait(0.8)
                 isProcessing = false
                 return
             end
         end
 
-        -- ถ้าหัวห้องยังไม่เข้า หรือยังเลือกด่านไม่เสร็จ (Selecting...) ให้รอนอกห้องเด็ดขาด
         if not doorInfo or statusReason ~= "READY" then
             if statusReason == "SELECTING" then
-                updateUIStatus("LEADER SELECTING", string.format("หัวห้องอยู่ในประตู %s กำลังเลือกด่าน... ยืนรอนอกห้อง", doorInfo and doorInfo.model.Name or ""))
+                updateUIStatus("LEADER SELECTING", string.format("หัวตี้อยู่ในประตู %s กำลังเลือกด่าน... ยืนรอนอกห้อง", doorInfo and doorInfo.model.Name or ""))
             elseif statusReason == "EMPTY" then
-                updateUIStatus("WAITING DOOR SYNC", "หัวห้องเพิ่งก้าวเข้าประตู กำลังรอระบบอัปเดต...")
+                updateUIStatus("WAITING DOOR SYNC", "หัวตี้เพิ่งเข้าประตู รอสถานะประตูอัปเดต...")
             else
-                updateUIStatus("WAITING LEADER", "ยังไม่พบประตูหัวตี้ รอหัวตี้เดินเข้าประตูและเลือกด่าน...")
+                updateUIStatus("WAITING LEADER", "กำลังรอหัวตี้เดินเข้าประตูและล็อคด่าน...")
             end
             isProcessing = false
             return
         end
 
-        -- 3. หัวห้องเลือกด่านและกด START เสร็จแล้ว (สถานะ Waiting for players...)
         State.CurrentDoorName = doorInfo.model.Name
-        updateUIStatus("JOINING LEADER", "หัวห้องเลือกด่านเสร็จแล้ว! กำลังเดินเข้า " .. doorInfo.model.Name)
+        updateUIStatus("JOINING LEADER", "หัวตี้ล็อคด่านเสร็จแล้ว! กำลังเดินเข้า " .. doorInfo.model.Name)
 
-        -- 4. เดินเข้าประตูของหัวตี้
-        walkToDoor(doorInfo.door)
-        keepWalkingInsideDoor(doorInfo.door)
+        enterDoor(doorInfo.door, doorInfo.model.Name)
+        keepStandingInDoor(doorInfo.door)
 
-        updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย เดินเลี้ยงรอหัวห้องกดเริ่ม...")
+        updateUIStatus("IN LOBBY DOOR", "เข้าประตูหัวตี้เรียบร้อย รอหัวตี้กดเริ่มเกม...")
         task.wait(1.5)
         isProcessing = false
     end
 end
 
--- ── 9. Lobby Return & ACT 6 Victory Verification ─────────────────────────────
+-- ── 10. Lobby Return & ACT 6 Victory Verification ────────────────────────────
 local function checkLastMatchOutcome()
     if not isfile or not isfile(LAST_MATCH_FILE) then return end
     local lastMatch = nil
@@ -1247,37 +1326,71 @@ local function checkLastMatchOutcome()
     end)
     if not lastMatch then return end
 
-    -- ตรวจสอบว่าด่านที่เพิ่งเล่นไปคือ ACT 6 หรือไม่
     if lastMatch.isAct6 and Config.NotifyAct6 then
-        local target, _ = scanStoryProgress()
-        if target and target.allMaps then
-            for _, m in ipairs(target.allMaps) do
-                -- ถ้าแมพเป้าหมายเดิมตอนนี้ขึ้นเคลียร์ครบ 6/6 แล้ว แสดงว่าเพิ่งชนะ ACT 6 สดๆ ร้อนๆ!
-                if m.id == lastMatch.mapId and m.cleared >= 6 then
-                    State.Act6ClearedCount = State.Act6ClearedCount + 1
-                    sendWebhook(
-                        "🏆 [Anime Adventures] ผ่านด่าน ACT 6 สำเร็จ!",
-                        string.format("🎉 **เคลียร์ด่านสุดท้ายของแมพสำเร็จแล้ว!**\n\n🗺️ **แมพ:** `%s` (`%s`)\n⭐ **ระดับ:** `Act 6 (Completed)`\n👤 **ผู้เล่น:** `%s`\n🎮 **โหมด:** `%s`",
-                            lastMatch.mapName, lastMatch.mapId, LocalPlayer.Name, Config.Mode),
-                        0x00FF88,
-                        {
-                            { name = "🗺️ โลก", value = lastMatch.mapName, inline = true },
-                            { name = "⭐ ระดับ", value = "Act 6 (Cleared)", inline = true },
-                            { name = "⏱️ เวลา", value = os.date("%H:%M:%S"), inline = true }
-                        }
-                    )
-                    break
+        local isAct6NowCleared = false
+
+        -- 1. เช็คตรงจาก Profile Memory ก่อน
+        pcall(function()
+            local lvlData = getProfileLevelData()
+            if lvlData and lvlData.completed_story_levels and lastMatch.levelId then
+                local entry = lvlData.completed_story_levels[lastMatch.levelId]
+                if entry and entry.times_completed and entry.times_completed > 0 then
+                    isAct6NowCleared = true
+                end
+            end
+        end)
+
+        -- 2. เช็คจาก allMaps ใน scanStoryProgress()
+        if not isAct6NowCleared then
+            local target, _ = scanStoryProgress()
+            if target and target.allMaps then
+                for _, m in ipairs(target.allMaps) do
+                    if m.id == lastMatch.mapId and m.cleared >= (m.total or 6) then
+                        isAct6NowCleared = true
+                        break
+                    end
                 end
             end
         end
+
+        if isAct6NowCleared then
+            State.Act6ClearedCount = State.Act6ClearedCount + 1
+            sendWebhook(
+                "🏆 [Anime Adventures] ผ่านด่าน ACT 6 สำเร็จ!",
+                string.format(
+                    "🎉 **เคลียร์ด่านสุดท้ายของแมพสำเร็จแล้ว!**\n\n🗺️ **แมพ:** `%s` (`%s`)\n⭐ **ระดับ:** `Act 6 (Completed)`\n👤 **ผู้เล่น:** `%s`\n🎮 **โหมด:** `%s`",
+                    tostring(lastMatch.mapName),
+                    tostring(lastMatch.mapId),
+                    LocalPlayer.Name,
+                    Config.Mode
+                ),
+                0x00FF88,
+                {
+                    { name = "🗺️ โลก", value = tostring(lastMatch.mapName), inline = true },
+                    { name = "⭐ ระดับ", value = "Act 6 (Cleared)", inline = true },
+                    { name = "⏱️ เวลา", value = os.date("%H:%M:%S"), inline = true }
+                }
+            )
+        end
     end
-    -- ลบไฟล์บันทึกสถานะรอบก่อน เพื่อไม่ให้แจ้งเตือนซ้ำ
-    pcall(function() if delfile then delfile(LAST_MATCH_FILE) end end)
+
+    pcall(function()
+        if delfile then delfile(LAST_MATCH_FILE) end
+    end)
 end
 
--- ── 10. Main Lobby Loop Thread ────────────────────────────────────────────────
+-- ── 11. Anti-AFK & Main Lobby Loop Thread ────────────────────────────────────
+pcall(function()
+    local VirtualUser = game:GetService("VirtualUser")
+    LocalPlayer.Idled:Connect(function()
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end)
+end)
+
 task.spawn(function()
-    -- รอให้ UI ในล็อบบี้โหลดสมบูรณ์
     task.wait(2)
     checkLastMatchOutcome()
 
@@ -1285,8 +1398,8 @@ task.spawn(function()
         pcall(function()
             handleLobbyProgression()
         end)
-        task.wait(Config.CheckInterval or 3.0)
+        task.wait(Config.CheckInterval or 2.5)
     end
 end)
 
-print("[AA Auto Story] 🚀 Lobby Story Engine loaded successfully!")
+print("[AA Auto Story v2.0] 🚀 Overhauled Lobby Story Engine loaded successfully!")
