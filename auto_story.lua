@@ -532,15 +532,15 @@ local function clickGuiElement(btn)
     return clicked
 end
 
--- กดปุ่ม START : game:GetService("Players").LocalPlayer.PlayerGui.LevelSelectGui.Buttons.Start
-local function pressStartButton(target)
+-- เลือกระดับด่านและกดปุ่ม Select : game.Players.LocalPlayer.PlayerGui.LevelSelectGui.LevelSelect.Buttons.Select
+local function lockStoryLevelInUI(target)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not pGui then return false, "PlayerGui not found" end
 
-    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 3 วินาที)
+    -- รอให้ LevelSelectGui ปรากฏขึ้นมา (สูงสุด 3.5 วินาที)
     local lvlGui = pGui:FindFirstChild("LevelSelectGui")
     local t0 = tick()
-    while not lvlGui and (tick() - t0 < 3) do
+    while not lvlGui and (tick() - t0 < 3.5) do
         task.wait(0.2)
         lvlGui = pGui:FindFirstChild("LevelSelectGui")
     end
@@ -549,10 +549,9 @@ local function pressStartButton(target)
         return false, "LevelSelectGui not found in PlayerGui"
     end
 
-    -- 1. ถ้ามีข้อมูล target ลองเลือกแมพและระดับ Act ให้ตรงใน UI ก่อนกด Start
     local clicked = false
 
-    -- 1. ถ้ามีข้อมูล target เลือกแมพและระดับ Act ให้ตรงใน UI
+    -- 1. เลือกแมพใน MapSelect.Main.Wrapper.Container
     if target and target.mapId then
         pcall(function()
             local container = getLevelSelectContainer()
@@ -596,31 +595,36 @@ local function pressStartButton(target)
         end)
     end
 
-    -- 4. ค้นหาปุ่ม Start ใน LevelSelectGui.Buttons.Start (สำหรับเริ่มแมตช์)
+    return clicked, "Level selected and locked via Select button"
+end
+
+-- กดปุ่ม START : game:GetService("Players").LocalPlayer.PlayerGui.LevelSelectGui.Buttons.Start (สำหรับเริ่มแมตช์)
+local function pressStartMatchButton()
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local lvlGui = pGui and pGui:FindFirstChild("LevelSelectGui")
+    if not lvlGui then return false, "No LevelSelectGui" end
+
     local buttons = lvlGui:FindFirstChild("Buttons")
-    local startObj = buttons and buttons:FindFirstChild("Start")
-    if not startObj then
-        startObj = lvlGui:FindFirstChild("Start", true)
+    local startObj = buttons and buttons:FindFirstChild("Start") or lvlGui:FindFirstChild("Start", true)
+    if not startObj then return false, "No Start button" end
+
+    local clicked = false
+    if startObj:IsA("GuiButton") then
+        clicked = clickGuiElement(startObj) or clicked
     end
 
-    if startObj and (startObj.Visible or (startObj:IsA("GuiObject") and startObj.AbsoluteSize.X > 0)) then
-        if startObj:IsA("GuiButton") then
-            clicked = clickGuiElement(startObj) or clicked
-        end
-
-        for _, ch in ipairs(startObj:GetChildren()) do
-            if ch:IsA("GuiButton") then
-                clicked = clickGuiElement(ch) or clicked
-            end
-        end
-
-        local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
-        if deepBtn and deepBtn ~= startObj then
-            clicked = clickGuiElement(deepBtn) or clicked
+    for _, ch in ipairs(startObj:GetChildren()) do
+        if ch:IsA("GuiButton") then
+            clicked = clickGuiElement(ch) or clicked
         end
     end
 
-    return clicked, "Level selected and locked successfully"
+    local deepBtn = startObj:FindFirstChildWhichIsA("GuiButton", true)
+    if deepBtn and deepBtn ~= startObj then
+        clicked = clickGuiElement(deepBtn) or clicked
+    end
+
+    return clicked, "Clicked Start button successfully"
 end
 
 local function isNearStoryDoors()
@@ -794,10 +798,27 @@ ModeDropdown:OnChanged(function(val)
 end)
 
 Tabs.Dashboard:AddButton({
-    Title       = "▶️ บังคับกดปุ่ม START ทันที (Force Click Start)",
-    Description = "คลิกปุ่ม LevelSelectGui.Buttons.Start ด้วยตนเอง",
+    Title       = "🔒 บังคับกดปุ่ม SELECT ล็อคด่าน (Force Click Select)",
+    Description = "คลิกปุ่ม LevelSelectGui.LevelSelect.Buttons.Select เพื่อล็อคด่าน",
     Callback    = function()
-        local ok, msg = pressStartButton(nil)
+        local target = State.TargetMapId and State.TargetMapId ~= "-" and {
+            mapId = State.TargetMapId,
+            act = State.TargetAct or 1
+        } or nil
+        local ok, msg = lockStoryLevelInUI(target)
+        Fluent:Notify({
+            Title    = "Force Click Select",
+            Content  = ok and "กดปุ่ม Select ล็อคด่านสำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
+            Duration = 3
+        })
+    end
+})
+
+Tabs.Dashboard:AddButton({
+    Title       = "▶️ บังคับกดปุ่ม START ทันที (Force Click Start)",
+    Description = "คลิกปุ่ม LevelSelectGui.Buttons.Start เพื่อเริ่มแมตช์",
+    Callback    = function()
+        local ok, msg = pressStartMatchButton()
         Fluent:Notify({
             Title    = "Force Click Start",
             Content  = ok and "กดปุ่ม START สำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
@@ -1000,47 +1021,64 @@ local function handleLobbyProgression()
         walkToDoor(doorInfo.door)
         task.wait(0.8)
 
-        -- 4. ล็อคระดับด่าน & กดปุ่ม START (LevelSelectGui.Buttons.Start)
-        updateUIStatus("STARTING LEVEL", string.format("เลือก %s Act %d และกดปุ่ม START...", target.mapName, target.act))
+        -- 4. ล็อคระดับด่านด้วยปุ่ม Select (LevelSelectGui.LevelSelect.Buttons.Select)
+        updateUIStatus("LOCKING LEVEL", string.format("เลือก %s Act %d และกดปุ่ม Select...", target.mapName, target.act))
 
         -- Backup remote invoke
         pcall(function()
             lockDoorLevel(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
         end)
 
-        -- Click the START button (LevelSelectGui.Buttons.Start) with retries
-        local startDone = false
-        for attempt = 1, 4 do
-            local ok, msg = pressStartButton(target)
+        -- กดปุ่ม Select ใน LevelSelect.Buttons.Select
+        local lockDone = false
+        for attempt = 1, 3 do
+            local ok, msg = lockStoryLevelInUI(target)
             if ok then
-                startDone = true
-                print(string.format("[AutoStory] 🟢 Press Start attempt #%d success: %s", attempt, tostring(msg)))
+                lockDone = true
+                print(string.format("[AutoStory] 🟢 Lock level attempt #%d success: %s", attempt, tostring(msg)))
                 break
             else
-                print(string.format("[AutoStory] ⚠️ Press Start attempt #%d: %s, retrying...", attempt, tostring(msg)))
+                print(string.format("[AutoStory] ⚠️ Lock level attempt #%d: %s, retrying...", attempt, tostring(msg)))
                 task.wait(0.5)
             end
         end
 
-        -- If Solo Mode, let timer count down and start
+        -- If Solo Mode: ไม่มีเพื่อนต้องรอ กด START เริ่มเกมทันที!
         if Config.Mode == "Solo" then
+            updateUIStatus("STARTING SOLO", "ล็อคด่านแล้ว กำลังกดปุ่ม START...")
+            task.wait(0.5)
+            for attempt = 1, 3 do
+                local ok = pressStartMatchButton()
+                if ok then break end
+                task.wait(0.5)
+            end
             updateUIStatus("READY", "กด START เรียบร้อย กำลังรอเทเลพอร์ตเข้าแมพ...")
             task.wait(5)
             isProcessing = false
             return
         end
 
-        -- If Party Leader Mode: wait for party members
+        -- If Party Leader Mode: ล็อคด่านเสร็จแล้ว ไม่ต้องทำอะไร ยืนรอเพื่อนร่วมตี้เดินเข้ามา!
+        updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว ยืนรอเพื่อนเข้าห้อง (1/%d คน)...", Config.PartySize))
+
         local waitStart = tick()
         while tick() - waitStart < Config.DoorWaitTimeout do
             local currentPlayers = countPlayersInDoor(doorInfo.door)
             State.PartyCount = currentPlayers
-            updateUIStatus("WAITING PARTY", string.format("รอเพื่อนร่วมตี้ (%d/%d คน)", currentPlayers, Config.PartySize))
+            updateUIStatus("WAITING PARTY", string.format("ล็อคด่านแล้ว รอเพื่อนร่วมตี้ (%d/%d คน)", currentPlayers, Config.PartySize))
 
+            -- พอเพื่อนมาครบตามจำนวนตี้ ค่อยกด START!
             if currentPlayers >= Config.PartySize then
-                updateUIStatus("PARTY FULL", "สมาชิกครบแล้ว! รอตัวเกมเริ่มต้น...")
-                -- Ensure Start button is clicked once more when full if needed
-                pcall(function() pressStartButton(target) end)
+                updateUIStatus("PARTY FULL", "สมาชิกครบแล้ว! กำลังกดปุ่ม START...")
+                task.wait(0.8)
+                for attempt = 1, 4 do
+                    local ok, msg = pressStartMatchButton()
+                    if ok then
+                        print(string.format("[AutoStory] 🟢 Party full -> Pressed START attempt #%d!", attempt))
+                        break
+                    end
+                    task.wait(0.5)
+                end
                 task.wait(3)
                 break
             end
