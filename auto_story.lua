@@ -305,12 +305,23 @@ local function countPlayersInDoor(doorPart)
     return count
 end
 
+local function findLeaderPlayer(leaderInput)
+    if not leaderInput or #leaderInput == 0 then return nil end
+    local clean = leaderInput:gsub("^@", ""):lower()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower() == clean or p.DisplayName:lower() == clean then
+            return p
+        end
+    end
+    return nil
+end
+
 local function findLeaderDoor(leaderName, targetMapName, targetAct)
     local story = getStoryLobbies()
     if not story then return nil end
 
-    -- 1. Scan by Leader Position if leader is in server
-    local leaderPlayer = leaderName and #leaderName > 0 and Players:FindFirstChild(leaderName)
+    -- 1. Scan by Leader Position if leader is in server (matches Username or DisplayName)
+    local leaderPlayer = findLeaderPlayer(leaderName)
     local leaderHrp = leaderPlayer and leaderPlayer.Character and leaderPlayer.Character:FindFirstChild("HumanoidRootPart")
 
     if leaderHrp then
