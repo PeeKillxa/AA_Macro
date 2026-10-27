@@ -318,35 +318,46 @@ end
 
 local function findLeaderDoor(leaderName, targetMapName, targetAct)
     local story = getStoryLobbies()
-    if not story then return nil end
+    if not story then return nil, "NO_LOBBIES" end
 
-    -- 1. Scan by Leader Position if leader is in server (matches Username or DisplayName)
     local leaderPlayer = findLeaderPlayer(leaderName)
     local leaderHrp = leaderPlayer and leaderPlayer.Character and leaderPlayer.Character:FindFirstChild("HumanoidRootPart")
 
+    -- 1. ตรวจสอบจากตำแหน่งตัวละครของหัวห้อง (หากอยู่ในเซิร์ฟเวอร์เดียวกัน)
     if leaderHrp then
         for _, doorModel in ipairs(story:GetChildren()) do
             local info = getDoorInfo(doorModel)
             if info and (info.door.Position - leaderHrp.Position).Magnitude <= 14 then
-                return info
+                -- หัวห้องอยู่ในประตูนี้! ตรวจสอบว่าหัวห้องเลือกด่านเสร็จหรือยัง:
+                if info.isSelecting then
+                    return info, "SELECTING"
+                end
+                if info.isEmpty then
+                    return info, "EMPTY"
+                end
+                -- ถ้าสถานะเป็น Waiting for players... หรือมี MapName/LevelName ล็อคแล้ว
+                if info.isWaiting or (#info.mapText > 0 and #info.lvlText > 0) then
+                    return info, "READY"
+                end
+                return info, "SELECTING"
             end
         end
     end
 
-    -- 2. Fallback scan by Door Surface GUI (MapName and Act)
+    -- 2. ตรวจสอบจากป้ายหน้าประตูที่มีสถานะ Waiting for players... และแมพ/Act ตรงกัน
     local actPattern = "act " .. tostring(targetAct)
     for _, doorModel in ipairs(story:GetChildren()) do
         local info = getDoorInfo(doorModel)
-        if info and info.isWaiting then
+        if info and info.isWaiting and not info.isSelecting and not info.isEmpty then
             local mapMatch = (targetMapName and info.mapText:lower():find(targetMapName:lower()) ~= nil)
             local actMatch = (info.lvlText:lower():find(actPattern) ~= nil)
             if mapMatch and actMatch then
-                return info
+                return info, "READY"
             end
         end
     end
 
-    return nil
+    return nil, "NOT_IN_DOOR"
 end
 
 local function clickGuiElement(btn)
@@ -937,27 +948,48 @@ local function handleLobbyProgression()
     elseif Config.Mode == "Party Member (Follower)" then
         isProcessing = true
 
-        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น
+        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น (แต่ยังไม่เดินเข้าประตู)
         updateUIStatus("FAST TRAVEL", "กดปุ่ม PLAY (EventTeleport) วาร์ปไปโซนประตู...")
         fastTravelToPlayZone()
 
-        -- 2. ค้นหาประตูของหัวตี้
-        updateUIStatus("SEARCHING LEADER", "กำลังหาประตูของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
-        local doorInfo = findLeaderDoor(Config.LeaderUsername, target.mapName, target.act)
-        if not doorInfo then
-            updateUIStatus("WAITING LEADER", "ยังไม่พบประตูหัวตี้ รอหัวตี้เลือกห้อง...")
+        -- 2. ค้นหาประตูของหัวตี้ และตรวจสอบว่าหัวห้องเลือกด่านเสร็จหรือยัง
+        updateUIStatus("CHECKING LEADER", "กำลังเช็คสถานะห้องของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
+        local doorInfo, statusReason = findLeaderDoor(Config.LeaderUsername, target.mapName, target.act)
+
+        -- ถ้าลูกตี้ยืนอยู่ในประตูของหัวตี้อยู่แล้ว ให้ยืนรอจนกว่าด่านจะเริ่ม
+        if doorInfo and doorInfo.door then
+            local root = getRoot()
+            if root and (root.Position - doorInfo.door.Position).Magnitude <= 10 then
+                State.CurrentDoorName = doorInfo.model.Name
+                updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย รอด่านเริ่มพร้อมตี้...")
+                task.wait(3)
+                isProcessing = false
+                return
+            end
+        end
+
+        -- ถ้าหัวห้องยังไม่เข้า หรือยังเลือกด่านไม่เสร็จ (Selecting...) ให้รอนอกห้องเด็ดขาด
+        if not doorInfo or statusReason ~= "READY" then
+            if statusReason == "SELECTING" then
+                updateUIStatus("LEADER SELECTING", string.format("หัวห้องอยู่ในประตู %s กำลังเลือกด่าน... ยืนรอนอกห้อง", doorInfo and doorInfo.model.Name or ""))
+            elseif statusReason == "EMPTY" then
+                updateUIStatus("WAITING DOOR SYNC", "หัวห้องเพิ่งก้าวเข้าประตู กำลังรอระบบอัปเดต...")
+            else
+                updateUIStatus("WAITING LEADER", "ยังไม่พบประตูหัวตี้ รอหัวตี้เดินเข้าประตูและเลือกด่าน...")
+            end
             isProcessing = false
             return
         end
 
+        -- 3. หัวห้องเลือกด่านและกด START เสร็จแล้ว (สถานะ Waiting for players...)
         State.CurrentDoorName = doorInfo.model.Name
-        updateUIStatus("JOINING LEADER", "พบประตูแล้ว กำลังเดินเข้า " .. doorInfo.model.Name)
+        updateUIStatus("JOINING LEADER", "หัวห้องเลือกด่านเสร็จแล้ว! กำลังเดินเข้า " .. doorInfo.model.Name)
 
-        -- 3. เดินเข้าประตูของหัวตี้
+        -- 4. เดินเข้าประตูของหัวตี้
         walkToDoor(doorInfo.door)
 
         updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย รอด่านเริ่มพร้อมตี้...")
-        task.wait(4)
+        task.wait(3)
         isProcessing = false
     end
 end
