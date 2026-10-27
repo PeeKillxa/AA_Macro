@@ -507,6 +507,81 @@ local function pressStartButton(target)
     return clicked, "Clicked Start button successfully"
 end
 
+local function isNearStoryDoors()
+    local root = getRoot()
+    local story = getStoryLobbies()
+    if not root or not story then return false end
+    for _, doorModel in ipairs(story:GetChildren()) do
+        local door = doorModel:FindFirstChild("Door")
+        if door and (door.Position - root.Position).Magnitude <= 20 then
+            return true
+        end
+    end
+    return false
+end
+
+-- กดปุ่ม PLAY : game:GetService("Players").LocalPlayer.PlayerGui.LeftUI_test.Buttons.EventTeleport
+local function fastTravelToPlayZone()
+    if isNearStoryDoors() then
+        return true
+    end
+
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local leftUI = pGui and pGui:FindFirstChild("LeftUI_test")
+    local eventBtn = leftUI and leftUI:FindFirstChild("Buttons") and leftUI.Buttons:FindFirstChild("EventTeleport")
+
+    if eventBtn then
+        print("[AutoStory] 📍 Clicking LeftUI_test.Buttons.EventTeleport (PLAY)...")
+        clickGuiElement(eventBtn)
+        task.wait(1.5)
+        return true
+    end
+    return false
+end
+
+-- สั่งตัวละครเดินตรงเข้าประตูอย่างเป็นธรรมชาติ
+local function walkToDoor(doorPart)
+    if not doorPart then return end
+    local char = getCharacter()
+    local root = getRoot()
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
+
+    local targetPos = Vector3.new(doorPart.Position.X, root.Position.Y, doorPart.Position.Z)
+    local distXZ = (Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z)).Magnitude
+
+    -- ถ้าอยู่ไกลเกิน 35 studs ให้ CFrame มาตั้งหลักหน้าประตูก่อนที่ระยะ 8 studs
+    if distXZ > 35 then
+        root.CFrame = doorPart.CFrame * CFrame.new(0, 0, 8)
+        task.wait(0.15)
+    end
+
+    -- สั่ง Humanoid เดินตรงเข้าหาประตู
+    local walkStart = tick()
+    while (tick() - walkStart) < 5 do
+        if not root or not hum or not doorPart then break end
+        local currentDist = (Vector2.new(root.Position.X - doorPart.Position.X, root.Position.Z - doorPart.Position.Z)).Magnitude
+        if currentDist <= 3.0 then
+            break
+        end
+        hum:MoveTo(targetPos)
+        task.wait(0.1)
+    end
+
+    -- ก้าวเข้าไปยืนในประตู
+    root.CFrame = doorPart.CFrame * CFrame.new(0, 0, -2)
+    task.wait(0.1)
+
+    -- สัมผัสประตู (FireTouchInterest)
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(root, doorPart, 0)
+            task.wait(0.05)
+            firetouchinterest(root, doorPart, 1)
+        end)
+    end
+end
+
 local function lockDoorLevel(doorModelName, levelId, friendsOnly, difficulty)
     local remote = ReplicatedStorage:FindFirstChild("endpoints")
         and ReplicatedStorage.endpoints:FindFirstChild("client_to_server")
@@ -610,6 +685,19 @@ Tabs.Dashboard:AddButton({
         Fluent:Notify({
             Title    = "Force Click Start",
             Content  = ok and "กดปุ่ม START สำเร็จ!" or ("ไม่พบปุ่ม: " .. tostring(msg)),
+            Duration = 3
+        })
+    end
+})
+
+Tabs.Dashboard:AddButton({
+    Title       = "🚀 วาร์ปไปโซนเล่น (PLAY Fast Travel)",
+    Description = "คลิกปุ่ม LeftUI_test.Buttons.EventTeleport เพื่อวาร์ปไปหน้าห้องสตอรี่",
+    Callback    = function()
+        local ok = fastTravelToPlayZone()
+        Fluent:Notify({
+            Title    = "PLAY Fast Travel",
+            Content  = ok and "กดปุ่ม PLAY วาร์ปสำเร็จ!" or "ไม่พบปุ่ม LeftUI_test.Buttons.EventTeleport",
             Duration = 3
         })
     end
@@ -775,8 +863,13 @@ local function handleLobbyProgression()
     -- Case 2: Solo / Host Mode
     if Config.Mode == "Solo" or Config.Mode == "Party Leader (Host)" then
         isProcessing = true
-        updateUIStatus("SEARCHING DOOR", "กำลังหาประตูที่ว่าง (Empty)...")
 
+        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น
+        updateUIStatus("FAST TRAVEL", "กดปุ่ม PLAY (EventTeleport) วาร์ปไปโซนประตู...")
+        fastTravelToPlayZone()
+
+        -- 2. ค้นหาประตูที่ว่าง
+        updateUIStatus("SEARCHING DOOR", "กำลังหาประตูที่ว่าง (Empty)...")
         local doorInfo = findEmptyDoor()
         if not doorInfo then
             updateUIStatus("WAITING DOOR", "ประตูเต็ม กำลังรอห้องว่าง...")
@@ -785,21 +878,16 @@ local function handleLobbyProgression()
         end
 
         State.CurrentDoorName = doorInfo.model.Name
-        updateUIStatus("ENTERING DOOR", "เดินเข้าประตู " .. doorInfo.model.Name)
+        updateUIStatus("WALKING TO DOOR", "กำลังเดินเข้าประตู " .. doorInfo.model.Name .. "...")
 
-        -- Teleport inside door
-        teleportTo(doorInfo.cframe * CFrame.new(0, 0, -2))
-        if firetouchinterest then
-            firetouchinterest(getRoot(), doorInfo.door, 0)
-            task.wait(0.05)
-            firetouchinterest(getRoot(), doorInfo.door, 1)
-        end
-        task.wait(1.5)
+        -- 3. เดินเข้าประตูอย่างเป็นธรรมชาติ
+        walkToDoor(doorInfo.door)
+        task.wait(0.8)
 
-        -- Lock the target story level & Click Start Button
+        -- 4. ล็อคระดับด่าน & กดปุ่ม START (LevelSelectGui.Buttons.Start)
         updateUIStatus("STARTING LEVEL", string.format("เลือก %s Act %d และกดปุ่ม START...", target.mapName, target.act))
 
-        -- Try firing remote as backup (non-blocking)
+        -- Backup remote invoke
         pcall(function()
             lockDoorLevel(doorInfo.model.Name, target.levelId, Config.FriendsOnly, Config.Difficulty)
         end)
@@ -848,8 +936,13 @@ local function handleLobbyProgression()
     -- Case 3: Party Member (Follower) Mode
     elseif Config.Mode == "Party Member (Follower)" then
         isProcessing = true
-        updateUIStatus("SEARCHING LEADER", "กำลังหาประตูของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
 
+        -- 1. กดปุ่ม PLAY (LeftUI_test.Buttons.EventTeleport) เพื่อวาร์ปมาโซนเล่น
+        updateUIStatus("FAST TRAVEL", "กดปุ่ม PLAY (EventTeleport) วาร์ปไปโซนประตู...")
+        fastTravelToPlayZone()
+
+        -- 2. ค้นหาประตูของหัวตี้
+        updateUIStatus("SEARCHING LEADER", "กำลังหาประตูของหัวตี้ (" .. tostring(Config.LeaderUsername) .. ")...")
         local doorInfo = findLeaderDoor(Config.LeaderUsername, target.mapName, target.act)
         if not doorInfo then
             updateUIStatus("WAITING LEADER", "ยังไม่พบประตูหัวตี้ รอหัวตี้เลือกห้อง...")
@@ -860,13 +953,8 @@ local function handleLobbyProgression()
         State.CurrentDoorName = doorInfo.model.Name
         updateUIStatus("JOINING LEADER", "พบประตูแล้ว กำลังเดินเข้า " .. doorInfo.model.Name)
 
-        -- Teleport inside the door with the party
-        teleportTo(doorInfo.cframe * CFrame.new(0, 0, -2))
-        if firetouchinterest then
-            firetouchinterest(getRoot(), doorInfo.door, 0)
-            task.wait(0.05)
-            firetouchinterest(getRoot(), doorInfo.door, 1)
-        end
+        -- 3. เดินเข้าประตูของหัวตี้
+        walkToDoor(doorInfo.door)
 
         updateUIStatus("IN LOBBY DOOR", "อยู่ในประตูเรียบร้อย รอด่านเริ่มพร้อมตี้...")
         task.wait(4)
