@@ -22,7 +22,7 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local GuiService = game:GetService("GuiService")
 
-local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
+local API_URL = "http://10.1.251.3:3000/api/telemetry"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
