@@ -576,6 +576,27 @@ local function getGameStats()
 end
 
 -- ฟังก์ชันส่ง Telemetry เข้าเว็บ Vercel
+local function detectDeviceName()
+    if isfile and readfile and isfile("device_name.txt") then
+        local ok, content = pcall(readfile, "device_name.txt")
+        if ok and content and #content > 0 then
+            local clean = content:gsub("[\r\n]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if #clean > 0 then return clean end
+        end
+    end
+    local isAndroid = false
+    pcall(function()
+        local uis = game:GetService("UserInputService")
+        if uis:GetPlatform() == Enum.Platform.Android then
+            isAndroid = true
+        end
+    end)
+    if isAndroid then
+        return "Android Emu"
+    end
+    return "PC"
+end
+
 sendTelemetry = function(customStatus)
     local pingMs = 50
     pcall(function()
@@ -590,6 +611,7 @@ sendTelemetry = function(customStatus)
         user_id = player.UserId,
         username = player.Name,
         display_name = player.DisplayName,
+        device_name = detectDeviceName(),
         avatar_url = string.format(
             "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=150&height=150&format=png",
             player.UserId
@@ -606,6 +628,7 @@ sendTelemetry = function(customStatus)
         wins = sessionWins,
         disconnects = sessionDisconnects,
         extra_stats = {
+            device_name = detectDeviceName(),
             rerolls = gameStats.rerolls,
             wave = curWave > 0 and ("Wave " .. tostring(curWave)) or "Lobby"
         },
