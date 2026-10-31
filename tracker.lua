@@ -60,6 +60,7 @@ end)
 -- ============================================================
 local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId))
 local heartbeatFile = "watchdog_heartbeat.txt"
+local animeUIStatusFile = "watchdog_ui_status.txt"
 local rokidCheckFile = string.format("executor_check_%s.txt", tostring(player.Name))
 local isKickedOrDisconnected = false
 local disconnectReason = ""
@@ -226,6 +227,33 @@ local function pulseHeartbeat()
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android (ทั้งรูปแบบ Watchdog และ Rokid)
         writefile(heartbeatFile, nowEpoch .. "\n")
         writefile(rokidCheckFile, "working:" .. nowEpoch .. "\n")
+        -- Report whether the Anime Adventures control UI exists and is enabled.
+        -- The Windows watchdog uses this short-lived signal for its startup check.
+        local uiExists = false
+        local uiEnabled = false
+        pcall(function()
+            local pg = player:FindFirstChild("PlayerGui")
+            local ui = pg and pg:FindFirstChild("XT_AnimeAdventuresUI")
+            if ui then
+                uiExists = true
+                if ui:IsA("LayerCollector") then
+                    uiEnabled = ui.Enabled == true
+                elseif ui:IsA("GuiObject") then
+                    uiEnabled = ui.Visible == true
+                else
+                    for _, child in ipairs(ui:GetDescendants()) do
+                        if child:IsA("GuiObject") and child.Visible then
+                            uiEnabled = true
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+        writefile(
+            animeUIStatusFile,
+            string.format("%d|%s|%d|%d\n", os.time(), tostring(game.GameId), uiExists and 1 or 0, uiEnabled and 1 or 0)
+        )
         -- 2. บันทึก Session Uptime + Wins + Disconnects สะสม ไม่ให้รีตอน Replay / Server Hop
         saveSessionData()
     end)
