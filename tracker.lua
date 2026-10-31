@@ -242,7 +242,8 @@ local function pulseHeartbeat()
                     uiEnabled = ui.Visible == true
                 else
                     for _, child in ipairs(ui:GetDescendants()) do
-                        if child:IsA("GuiObject") and child.Visible then
+                        if (child:IsA("LayerCollector") and child.Enabled)
+                            or (child:IsA("GuiObject") and child.Visible) then
                             uiEnabled = true
                             break
                         end
