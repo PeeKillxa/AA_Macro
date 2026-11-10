@@ -107,8 +107,8 @@ local function startInGameTeleportLoop(customPlaceId, reasonLabel)
     local cfg = getAutoRejoinConfig()
     local targetPlaceId = tonumber(customPlaceId)
     if not targetPlaceId or targetPlaceId <= 0 then
-        local isAA = (tonumber(game.GameId) == AA_UNIVERSE_ID or game.PlaceId == AA_LOBBY_PLACE_ID or game.PlaceId == 8349889591)
-        targetPlaceId = isAA and cfg.place_id or game.PlaceId
+        -- บังคับกลับเข้า Lobby หลัก (8304191830) เสมอ เพื่อป้องกันการวาร์ปเข้า Sub-Place ด่าน (14229839966 / 14918509670 / 8349889591) แล้วติด Error Code 524 ซ้ำ!
+        targetPlaceId = (cfg.place_id and cfg.place_id > 0) and cfg.place_id or AA_LOBBY_PLACE_ID
     end
 
     warn(string.format("[InGameRejoin] 🔄 (%s) Leaving map & rejoining PlaceId %d inside current Roblox window...", tostring(reasonLabel or "AutoRejoin"), targetPlaceId))
@@ -293,24 +293,43 @@ local function onDisconnectDetected(reason, errCode)
     end
 end
 
--- ดักจับเมื่อมี Error / Kick modal จาก GuiService (กรองเฉพาะ Disconnect จริง ไม่นับ Teleport / Replay Code 285)
+-- ดักจับเมื่อมี Error / Kick / Error Code 524 modal จาก GuiService (กรองเฉพาะ Disconnect/Error จริง ไม่นับ Code 285)
 pcall(function()
     GuiService.ErrorMessageChanged:Connect(function(msg)
         pcall(function()
             local code = GuiService:GetErrorCode().Value
             local lowerMsg = tostring(msg or ""):lower()
-            -- ข้าม Code 285 (DisconnectClientInitiated) และการวาร์ปย้ายเซิร์ฟเวอร์ปกติทั้งหมด
-            if code == 285 or lowerMsg:find("disconnectclientinitiated") or lowerMsg:find("teleport") or lowerMsg:find("joining") then
+            -- ข้ามเฉพาะ Code 285 (DisconnectClientInitiated) ตอนกำลังวาร์ปย้ายเซิร์ฟเวอร์ปกติ
+            if code == 285 or lowerMsg:find("disconnectclientinitiated") then
                 return
             end
-            if code >= Enum.ConnectionError.DisconnectErrors.Value then
-                onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", code, tostring(msg)), code)
+            local isErr524 = (code == 524 or lowerMsg:find("524") or lowerMsg:find("permission") or lowerMsg:find("not authorized") or lowerMsg:find("ไม่มีสิทธิ์"))
+            if isErr524 or code >= Enum.ConnectionError.DisconnectErrors.Value then
+                onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", isErr524 and 524 or code, tostring(msg)), isErr524 and 524 or code)
             end
         end)
     end)
 end)
 
--- ดักจับหน้าต่าง Popup เตือนหลุดทุกประเภทใน CoreGui (รวมถึง AFK 20 นาที)
+-- ดักจับเมื่อการวาร์ปย้ายด่านล้มเหลว (เช่น Error Code 524 / Unauthorized / Reserved Server ปิดตัว)
+pcall(function()
+    TeleportService.TeleportInitFailed:Connect(function(plr, teleportResult, errorMessage, failedPlaceId)
+        pcall(function()
+            if plr and plr ~= player then return end
+            local resName = tostring(teleportResult and teleportResult.Name or teleportResult)
+            local lowerErr = tostring(errorMessage or ""):lower()
+            warn(string.format("[AutoRejoin] ⚠️ TeleportInitFailed (%s) on Place %s: %s", resName, tostring(failedPlaceId), tostring(errorMessage)))
+            -- ข้ามเฉพาะกรณีที่กำลังวาร์ปซ้อนอยู่แล้ว (IsTeleporting / Flooded)
+            if teleportResult == Enum.TeleportResult.IsTeleporting or teleportResult == Enum.TeleportResult.Flooded then
+                return
+            end
+            local errCode = (teleportResult == Enum.TeleportResult.Unauthorized or lowerErr:find("524") or lowerErr:find("permission")) and 524 or 773
+            onDisconnectDetected(string.format("TeleportInitFailed [%s / Code %d]: %s", resName, errCode, tostring(errorMessage)), errCode)
+        end)
+    end)
+end)
+
+-- ดักจับหน้าต่าง Popup เตือนหลุดทุกประเภทใน CoreGui (รวมถึง Error Code 524 และ AFK 20 นาที)
 task.spawn(function()
     pcall(function()
         local CoreGui = game:GetService("CoreGui")
@@ -327,9 +346,10 @@ task.spawn(function()
                 if errCode == 285 then return end
 
                 local txt = tostring(desc.Text or ""):lower()
-                if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
-                    if not txt:find("teleport") and not txt:find("joining") and not txt:find("285") and not txt:find("disconnectclientinitiated") then
-                        onDisconnectDetected("PromptModal: " .. tostring(desc.Text), errCode)
+                local is524 = (errCode == 524 or txt:find("524") or txt:find("permission") or txt:find("not authorized") or txt:find("ไม่มีสิทธิ์"))
+                if is524 or txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") or txt:find("รหัสข้อผิดพลาด") then
+                    if not txt:find("285") and not txt:find("disconnectclientinitiated") then
+                        onDisconnectDetected("PromptModal: " .. tostring(desc.Text), is524 and 524 or errCode)
                     end
                 end
             end
@@ -424,6 +444,16 @@ task.spawn(function()
                 if cmdRaw then
                     local placeArg = tonumber(tostring(cmdRaw):match("(%d+)"))
                     startInGameTeleportLoop(placeArg, "Command from NexusRobloxManager")
+                end
+            end)
+        end
+
+        -- เช็คซ้ำทุก 2 วินาทีว่ามี Error Code 524 หรือ ErrorCode ค้างอยู่บนหน้าจอหรือไม่ (กันพลาดกรณีขึ้นตั้งแต่ก่อนโหลดสคริปต์เสร็จ)
+        if not isKickedOrDisconnected and not isInGameRejoining then
+            pcall(function()
+                local code = GuiService:GetErrorCode().Value
+                if code == 524 or (code >= Enum.ConnectionError.DisconnectErrors.Value and code ~= 285) then
+                    onDisconnectDetected("GuiService Polling ErrorCode: " .. tostring(code), code)
                 end
             end)
         end
