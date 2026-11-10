@@ -58,26 +58,20 @@ end
 -- ป้องกันปัญหาค้างที่ game.Loaded:Wait() ตอนวาร์ปย้ายด่านแล้วเซิร์ฟตัดการเชื่อมต่อกลางทาง
 -- ============================================================
 local earlyRejoinTriggered = false
-local function triggerEarlyLobbyTeleport(reasonStr)
+local function triggerEarlyDisconnectKill(reasonStr)
     if earlyRejoinTriggered then return end
     local cfg = getAutoRejoinConfig()
     if not cfg.enabled then return end
     earlyRejoinTriggered = true
-    local targetPlaceId = (cfg.place_id and cfg.place_id > 0) and cfg.place_id or AA_LOBBY_PLACE_ID
-    warn(string.format("[EarlyAutoRejoin] 🔄 (%s) Detected disconnect before map load! Rejoining Lobby %d...", tostring(reasonStr), targetPlaceId))
-    task.spawn(function()
-        task.wait(2)
-        while env._COOK45_TRACKER_RUN_ID == CURRENT_RUN_ID do
-            pcall(function() GuiService:ClearError() end)
-            pcall(function()
-                if Players.LocalPlayer then
-                    TeleportService:Teleport(targetPlaceId, Players.LocalPlayer)
-                else
-                    TeleportService:Teleport(targetPlaceId)
-                end
-            end)
-            task.wait(5)
+    warn(string.format("[EarlyDisconnectGuard] 🚨 (%s) Detected disconnect before map load! Closing Roblox so Real restarts it...", tostring(reasonStr)))
+    pcall(function()
+        if writefile then
+            writefile("watchdog_disconnected.txt", tostring(reasonStr) .. "\n")
         end
+    end)
+    task.spawn(function()
+        task.wait(1.5)
+        pcall(function() game:Shutdown() end)
     end)
 end
 
@@ -87,14 +81,14 @@ while (not game:IsLoaded() or not Players.LocalPlayer) and (os.clock() - loadWai
     local errVal = 0
     pcall(function() errVal = GuiService:GetErrorCode().Value end)
     if errVal == 524 or (errVal >= 256 and errVal ~= 285) then
-        triggerEarlyLobbyTeleport("ErrorCode during load: " .. tostring(errVal))
+        triggerEarlyDisconnectKill("ErrorCode during load: " .. tostring(errVal))
         break
     end
     task.wait(0.5)
 end
 
 if not Players.LocalPlayer and (os.clock() - loadWaitStart) >= 35 then
-    triggerEarlyLobbyTeleport("LocalPlayer/Map load timeout > 35s")
+    triggerEarlyDisconnectKill("LocalPlayer/Map load timeout > 35s")
 end
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -326,14 +320,15 @@ local function onDisconnectDetected(reason, errCode)
         end
     end)
 
-    -- 3. In-Game Auto-Rejoin Loop (ออกแมพเข้าใหม่ในหน้าต่างเดิม ไม่ปิด Roblox! ยกเว้น Error 276/273 บัญชีซ้อน)
+    -- 3. Auto-Close Roblox to let Real re-launch clean instance (ยกเว้น Error 276/273 บัญชีซ้อน)
     local lowerReason = tostring(disconnectReason):lower()
     local isSameAccount = (disconnectErrorCode == 276 or disconnectErrorCode == 273 or lowerReason:find("same account") or lowerReason:find("276"))
     local cfg = getAutoRejoinConfig()
     if not isSameAccount and cfg.enabled then
         task.spawn(function()
-            task.wait(4)
-            startInGameTeleportLoop(nil, disconnectReason)
+            task.wait(1.5)
+            warn("[Watchdog] 💀 Closing Roblox to let Real restart it automatically...")
+            pcall(function() game:Shutdown() end)
         end)
     end
 end
@@ -514,7 +509,7 @@ task.spawn(function()
                     local cfg = getAutoRejoinConfig()
                     if cfg.enabled and (os.time() - scriptLoadedAt) >= cfg.ui_timeout_sec then
                         uiValidated = true
-                        startInGameTeleportLoop(cfg.place_id, "XT_AnimeAdventuresUI did not open in time")
+                        onDisconnectDetected("XT_AnimeAdventuresUI did not open in time", 999)
                     end
                 end
             end)
