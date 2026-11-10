@@ -21,9 +21,12 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local GuiService = game:GetService("GuiService")
+local TeleportService = game:GetService("TeleportService")
 
 local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
+local AA_LOBBY_PLACE_ID = 8304191830
+local AA_UNIVERSE_ID = 3183403065
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 if not httpRequest then
@@ -62,13 +65,18 @@ local sessionFile = string.format("bot_session_%s.json", tostring(player.UserId)
 local heartbeatFile = "watchdog_heartbeat.txt"
 local animeUIStatusFile = "watchdog_ui_status.txt"
 local rokidCheckFile = string.format("executor_check_%s.txt", tostring(player.Name))
+local pcHeartbeatFile = string.format("watchdog_hb_%s.json", tostring(player.UserId))
+local pcDisconnectFile = string.format("watchdog_dc_%s.txt", tostring(player.UserId))
 local isKickedOrDisconnected = false
+local isTeleportingFlag = false
 local disconnectReason = ""
+local disconnectErrorCode = 0
 
 -- ล้างไฟล์แจ้งเตือนหลุดค้างเก่าทันทีเมื่อสคริปต์โหลดเข้าแมพสำเร็จ
 pcall(function()
-    if delfile and isfile and isfile("watchdog_disconnected.txt") then
-        delfile("watchdog_disconnected.txt")
+    if delfile and isfile then
+        if isfile("watchdog_disconnected.txt") then delfile("watchdog_disconnected.txt") end
+        if isfile(pcDisconnectFile) then delfile(pcDisconnectFile) end
     end
 end)
 
@@ -76,13 +84,30 @@ end)
 pcall(function()
     player.OnTeleport:Connect(function(teleportState)
         pcall(function()
+            isTeleportingFlag = true
             if writefile then
-                local nowStr = tostring(os.time()) .. "\n"
+                local nowEpoch = os.time()
+                local nowStr = tostring(nowEpoch) .. "\n"
                 writefile(heartbeatFile, nowStr)
-                writefile(rokidCheckFile, "working:" .. tostring(os.time()))
+                writefile(rokidCheckFile, "working:" .. tostring(nowEpoch))
+                writefile(pcHeartbeatFile, HttpService:JSONEncode({
+                    user_id = player.UserId,
+                    username = player.Name,
+                    place_id = game.PlaceId,
+                    game_id = tostring(game.GameId),
+                    job_id = tostring(game.JobId or ""),
+                    last_seen = nowEpoch,
+                    ui_exists = true,
+                    ui_enabled = true,
+                    teleporting = true,
+                    disconnected = false,
+                    disconnect_code = 0,
+                    disconnect_reason = ""
+                }) .. "\n")
             end
-            if delfile and isfile and isfile("watchdog_disconnected.txt") then
-                delfile("watchdog_disconnected.txt")
+            if delfile and isfile then
+                if isfile("watchdog_disconnected.txt") then delfile("watchdog_disconnected.txt") end
+                if isfile(pcDisconnectFile) then delfile(pcDisconnectFile) end
             end
         end)
     end)
@@ -137,12 +162,13 @@ local function saveSessionData()
     end)
 end
 
--- ฟังก์ชันแจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python รู้ทันที
-local function onDisconnectDetected(reason)
+-- ฟังก์ชันแจ้งเตือน Disconnect ให้ Watchdog รู้ทันที + สั่ง Auto-Rejoin ในเกมอัตโนมัติ (Emu-Style Layer 1)
+local function onDisconnectDetected(reason, errCode)
     if isKickedOrDisconnected then return end
     isKickedOrDisconnected = true
     sessionDisconnects = sessionDisconnects + 1
     disconnectReason = reason or "Roblox Disconnected / Kicked"
+    disconnectErrorCode = tonumber(errCode) or 0
     warn("[AntiAFK/Watchdog] 🚨 DISCONNECT DETECTED: " .. tostring(disconnectReason))
 
     pcall(function()
@@ -152,9 +178,24 @@ local function onDisconnectDetected(reason)
         if delfile and isfile and isfile(heartbeatFile) then
             delfile(heartbeatFile)
         end
-        -- 2. เขียนไฟล์แจ้งเตือน Disconnect ให้ Watchdog ฝั่ง Python อ่านและสั่งรีจอทันที
+        -- 2. เขียนไฟล์แจ้งเตือน Disconnect ให้ Watchdog (ทั้ง Android และ PC) อ่านและสั่งรีจอทันที
         if writefile then
             writefile("watchdog_disconnected.txt", tostring(disconnectReason) .. "\n")
+            writefile(pcDisconnectFile, tostring(disconnectReason) .. "\n")
+            writefile(pcHeartbeatFile, HttpService:JSONEncode({
+                user_id = player.UserId,
+                username = player.Name,
+                place_id = game.PlaceId,
+                game_id = tostring(game.GameId),
+                job_id = tostring(game.JobId or ""),
+                last_seen = os.time(),
+                ui_exists = false,
+                ui_enabled = false,
+                teleporting = false,
+                disconnected = true,
+                disconnect_code = disconnectErrorCode,
+                disconnect_reason = tostring(disconnectReason)
+            }) .. "\n")
         end
     end)
 
@@ -164,6 +205,28 @@ local function onDisconnectDetected(reason)
             pcall(sendTelemetry, "OFFLINE")
         end
     end)
+
+    -- 3. In-Game Auto-Rejoin Loop (ยกเว้น Error 276/273 บัญชีซ้อนจากเครื่องอื่น)
+    local lowerReason = tostring(disconnectReason):lower()
+    local isSameAccount = (disconnectErrorCode == 276 or disconnectErrorCode == 273 or lowerReason:find("same account") or lowerReason:find("276"))
+    if not isSameAccount then
+        task.spawn(function()
+            local targetPlaceId = (tonumber(game.GameId) == AA_UNIVERSE_ID or game.PlaceId == AA_LOBBY_PLACE_ID or game.PlaceId == 8349889591)
+                and AA_LOBBY_PLACE_ID
+                or game.PlaceId
+            task.wait(5)
+            local attempt = 0
+            while env._COOK45_TRACKER_RUN_ID == CURRENT_RUN_ID do
+                attempt = attempt + 1
+                warn(string.format("[AutoRejoin] 🔄 Attempting In-Game Rejoin #%d -> PlaceId %d ...", attempt, targetPlaceId))
+                pcall(function() GuiService:ClearError() end)
+                pcall(function()
+                    TeleportService:Teleport(targetPlaceId, player)
+                end)
+                task.wait(8)
+            end
+        end)
+    end
 end
 
 -- ดักจับเมื่อมี Error / Kick modal จาก GuiService (กรองเฉพาะ Disconnect จริง ไม่นับ Teleport / Replay Code 285)
@@ -177,7 +240,7 @@ pcall(function()
                 return
             end
             if code >= Enum.ConnectionError.DisconnectErrors.Value then
-                onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", code, tostring(msg)))
+                onDisconnectDetected(string.format("GuiService Error [Code %d]: %s", code, tostring(msg)), code)
             end
         end)
     end)
@@ -202,7 +265,7 @@ task.spawn(function()
                 local txt = tostring(desc.Text or ""):lower()
                 if txt:find("idle") or txt:find("kick") or txt:find("disconnect") or txt:find("error") or txt:find("lost connection") then
                     if not txt:find("teleport") and not txt:find("joining") and not txt:find("285") and not txt:find("disconnectclientinitiated") then
-                        onDisconnectDetected("PromptModal: " .. tostring(desc.Text))
+                        onDisconnectDetected("PromptModal: " .. tostring(desc.Text), errCode)
                     end
                 end
             end
@@ -224,7 +287,8 @@ end)
 local function pulseHeartbeat()
     if not isFileSystemSupported or isKickedOrDisconnected or env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then return end
     pcall(function()
-        local nowEpoch = tostring(os.time())
+        local nowEpochInt = os.time()
+        local nowEpoch = tostring(nowEpochInt)
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android (ทั้งรูปแบบ Watchdog และ Rokid)
         writefile(heartbeatFile, nowEpoch .. "\n")
         writefile(rokidCheckFile, "working:" .. nowEpoch .. "\n")
@@ -254,8 +318,22 @@ local function pulseHeartbeat()
         end)
         writefile(
             animeUIStatusFile,
-            string.format("%d|%s|%d|%d\n", os.time(), tostring(game.GameId), uiExists and 1 or 0, uiEnabled and 1 or 0)
+            string.format("%d|%s|%d|%d\n", nowEpochInt, tostring(game.GameId), uiExists and 1 or 0, uiEnabled and 1 or 0)
         )
+        writefile(pcHeartbeatFile, HttpService:JSONEncode({
+            user_id = player.UserId,
+            username = player.Name,
+            place_id = game.PlaceId,
+            game_id = tostring(game.GameId),
+            job_id = tostring(game.JobId or ""),
+            last_seen = nowEpochInt,
+            ui_exists = uiExists,
+            ui_enabled = uiEnabled,
+            teleporting = isTeleportingFlag,
+            disconnected = false,
+            disconnect_code = 0,
+            disconnect_reason = ""
+        }) .. "\n")
         -- 2. บันทึก Session Uptime + Wins + Disconnects สะสม ไม่ให้รีตอน Replay / Server Hop
         saveSessionData()
     end)
