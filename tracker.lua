@@ -1,13 +1,9 @@
 -- ============================================================
--- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.5)
+-- 🤖 ROBLOX MULTI-ACCOUNT FARM TELEMETRY SENDER (v2.6)
 -- Optimized for: Anime Adventures (Lobby + Story/Match) & All Games
 -- Author: cook45 for clack (Tuned for nexuse-website.vercel.app & Rokid Watchdog v3.0)
 -- วางสคริปต์นี้ใน Auto-Execute ของ Executor ทุกจอ
 -- ============================================================
-
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
 
 -- ป้องกันการรันซ้ำซ้อนในแมพเดิม (ถ้ามีสคริปต์เรียกซ้ำ จะยกเลิกลูปเก่าอัตโนมัติ)
 local env = (getgenv and getgenv()) or _G
@@ -27,6 +23,79 @@ local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
 local AA_LOBBY_PLACE_ID = 8304191830
 local AA_UNIVERSE_ID = 3183403065
+local pcConfigFile = "nexus_autorejoin_config.json"
+local isFileSystemSupported = (writefile and readfile and isfile) and true or false
+
+local function stripUtf8Bom(s)
+    if type(s) ~= "string" then return "" end
+    return (s:gsub("^\239\187\191", ""))
+end
+
+local function getAutoRejoinConfig()
+    local cfg = { enabled = true, place_id = AA_LOBBY_PLACE_ID, ui_timeout_sec = 90 }
+    if isFileSystemSupported then
+        pcall(function()
+            if isfile(pcConfigFile) then
+                local raw = stripUtf8Bom(readfile(pcConfigFile))
+                local parsed = HttpService:JSONDecode(raw)
+                if type(parsed) == "table" then
+                    if parsed.enabled ~= nil then cfg.enabled = (parsed.enabled == true) end
+                    if tonumber(parsed.place_id) and tonumber(parsed.place_id) > 0 then
+                        cfg.place_id = tonumber(parsed.place_id)
+                    end
+                    if tonumber(parsed.ui_timeout_sec) and tonumber(parsed.ui_timeout_sec) >= 45 then
+                        cfg.ui_timeout_sec = tonumber(parsed.ui_timeout_sec)
+                    end
+                end
+            end
+        end)
+    end
+    return cfg
+end
+
+-- ============================================================
+-- 🚨 EARLY PRE-LOAD GUARD (ดักจับ Error Code 256 / 524 / 277 ตั้งแต่ก่อนแมพโหลดเสร็จ!)
+-- ป้องกันปัญหาค้างที่ game.Loaded:Wait() ตอนวาร์ปย้ายด่านแล้วเซิร์ฟตัดการเชื่อมต่อกลางทาง
+-- ============================================================
+local earlyRejoinTriggered = false
+local function triggerEarlyLobbyTeleport(reasonStr)
+    if earlyRejoinTriggered then return end
+    local cfg = getAutoRejoinConfig()
+    if not cfg.enabled then return end
+    earlyRejoinTriggered = true
+    local targetPlaceId = (cfg.place_id and cfg.place_id > 0) and cfg.place_id or AA_LOBBY_PLACE_ID
+    warn(string.format("[EarlyAutoRejoin] 🔄 (%s) Detected disconnect before map load! Rejoining Lobby %d...", tostring(reasonStr), targetPlaceId))
+    task.spawn(function()
+        task.wait(2)
+        while env._COOK45_TRACKER_RUN_ID == CURRENT_RUN_ID do
+            pcall(function() GuiService:ClearError() end)
+            pcall(function()
+                if Players.LocalPlayer then
+                    TeleportService:Teleport(targetPlaceId, Players.LocalPlayer)
+                else
+                    TeleportService:Teleport(targetPlaceId)
+                end
+            end)
+            task.wait(5)
+        end
+    end)
+end
+
+-- รอ game:IsLoaded() และ LocalPlayer แบบไม่บล็อกตาย (เช็ค Error 256/524 ทุก 0.5 วินาทีระหว่างโหลด)
+local loadWaitStart = os.clock()
+while (not game:IsLoaded() or not Players.LocalPlayer) and (os.clock() - loadWaitStart) < 35 do
+    local errVal = 0
+    pcall(function() errVal = GuiService:GetErrorCode().Value end)
+    if errVal == 524 or (errVal >= 256 and errVal ~= 285) then
+        triggerEarlyLobbyTeleport("ErrorCode during load: " .. tostring(errVal))
+        break
+    end
+    task.wait(0.5)
+end
+
+if not Players.LocalPlayer and (os.clock() - loadWaitStart) >= 35 then
+    triggerEarlyLobbyTeleport("LocalPlayer/Map load timeout > 35s")
+end
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 if not httpRequest then
@@ -69,36 +138,12 @@ local pcHeartbeatFile = string.format("watchdog_hb_%s.json", tostring(player.Use
 local pcDisconnectFile = string.format("watchdog_dc_%s.txt", tostring(player.UserId))
 local pcCmdByUidFile = string.format("watchdog_cmd_%s.txt", tostring(player.UserId))
 local pcCmdByNameFile = string.format("watchdog_cmd_%s.txt", tostring(player.Name))
-local pcConfigFile = "nexus_autorejoin_config.json"
-local isFileSystemSupported = (writefile and readfile and isfile) and true or false
 local isKickedOrDisconnected = false
 local isTeleportingFlag = false
 local isInGameRejoining = false
 local disconnectReason = ""
 local disconnectErrorCode = 0
 local scriptLoadedAt = os.time()
-
-local function getAutoRejoinConfig()
-    local cfg = { enabled = true, place_id = AA_LOBBY_PLACE_ID, ui_timeout_sec = 90 }
-    if isFileSystemSupported then
-        pcall(function()
-            if isfile(pcConfigFile) then
-                local raw = readfile(pcConfigFile)
-                local parsed = HttpService:JSONDecode(raw)
-                if type(parsed) == "table" then
-                    if parsed.enabled ~= nil then cfg.enabled = (parsed.enabled == true) end
-                    if tonumber(parsed.place_id) and tonumber(parsed.place_id) > 0 then
-                        cfg.place_id = tonumber(parsed.place_id)
-                    end
-                    if tonumber(parsed.ui_timeout_sec) and tonumber(parsed.ui_timeout_sec) >= 45 then
-                        cfg.ui_timeout_sec = tonumber(parsed.ui_timeout_sec)
-                    end
-                end
-            end
-        end)
-    end
-    return cfg
-end
 
 local function startInGameTeleportLoop(customPlaceId, reasonLabel)
     if isInGameRejoining then return end
