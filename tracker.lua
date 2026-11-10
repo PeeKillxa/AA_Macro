@@ -67,16 +67,91 @@ local animeUIStatusFile = "watchdog_ui_status.txt"
 local rokidCheckFile = string.format("executor_check_%s.txt", tostring(player.Name))
 local pcHeartbeatFile = string.format("watchdog_hb_%s.json", tostring(player.UserId))
 local pcDisconnectFile = string.format("watchdog_dc_%s.txt", tostring(player.UserId))
+local pcCmdByUidFile = string.format("watchdog_cmd_%s.txt", tostring(player.UserId))
+local pcCmdByNameFile = string.format("watchdog_cmd_%s.txt", tostring(player.Name))
+local pcConfigFile = "nexus_autorejoin_config.json"
+local isFileSystemSupported = (writefile and readfile and isfile) and true or false
 local isKickedOrDisconnected = false
 local isTeleportingFlag = false
+local isInGameRejoining = false
 local disconnectReason = ""
 local disconnectErrorCode = 0
+local scriptLoadedAt = os.time()
+
+local function getAutoRejoinConfig()
+    local cfg = { enabled = true, place_id = AA_LOBBY_PLACE_ID, ui_timeout_sec = 90 }
+    if isFileSystemSupported then
+        pcall(function()
+            if isfile(pcConfigFile) then
+                local raw = readfile(pcConfigFile)
+                local parsed = HttpService:JSONDecode(raw)
+                if type(parsed) == "table" then
+                    if parsed.enabled ~= nil then cfg.enabled = (parsed.enabled == true) end
+                    if tonumber(parsed.place_id) and tonumber(parsed.place_id) > 0 then
+                        cfg.place_id = tonumber(parsed.place_id)
+                    end
+                    if tonumber(parsed.ui_timeout_sec) and tonumber(parsed.ui_timeout_sec) >= 45 then
+                        cfg.ui_timeout_sec = tonumber(parsed.ui_timeout_sec)
+                    end
+                end
+            end
+        end)
+    end
+    return cfg
+end
+
+local function startInGameTeleportLoop(customPlaceId, reasonLabel)
+    if isInGameRejoining then return end
+    isInGameRejoining = true
+    isTeleportingFlag = true
+    local cfg = getAutoRejoinConfig()
+    local targetPlaceId = tonumber(customPlaceId)
+    if not targetPlaceId or targetPlaceId <= 0 then
+        local isAA = (tonumber(game.GameId) == AA_UNIVERSE_ID or game.PlaceId == AA_LOBBY_PLACE_ID or game.PlaceId == 8349889591)
+        targetPlaceId = isAA and cfg.place_id or game.PlaceId
+    end
+
+    warn(string.format("[InGameRejoin] 🔄 (%s) Leaving map & rejoining PlaceId %d inside current Roblox window...", tostring(reasonLabel or "AutoRejoin"), targetPlaceId))
+
+    pcall(function()
+        if writefile then
+            writefile(pcHeartbeatFile, HttpService:JSONEncode({
+                user_id = player.UserId,
+                username = player.Name,
+                place_id = game.PlaceId,
+                game_id = tostring(game.GameId),
+                job_id = tostring(game.JobId or ""),
+                last_seen = os.time(),
+                ui_exists = false,
+                ui_enabled = false,
+                teleporting = true,
+                disconnected = isKickedOrDisconnected,
+                disconnect_code = disconnectErrorCode,
+                disconnect_reason = tostring(reasonLabel or disconnectReason or "Rejoining in-game")
+            }) .. "\n")
+        end
+    end)
+
+    task.spawn(function()
+        local attempt = 0
+        while env._COOK45_TRACKER_RUN_ID == CURRENT_RUN_ID do
+            attempt = attempt + 1
+            pcall(function() GuiService:ClearError() end)
+            pcall(function()
+                TeleportService:Teleport(targetPlaceId, player)
+            end)
+            task.wait(6)
+        end
+    end)
+end
 
 -- ล้างไฟล์แจ้งเตือนหลุดค้างเก่าทันทีเมื่อสคริปต์โหลดเข้าแมพสำเร็จ
 pcall(function()
     if delfile and isfile then
         if isfile("watchdog_disconnected.txt") then delfile("watchdog_disconnected.txt") end
         if isfile(pcDisconnectFile) then delfile(pcDisconnectFile) end
+        if isfile(pcCmdByUidFile) then delfile(pcCmdByUidFile) end
+        if isfile(pcCmdByNameFile) then delfile(pcCmdByNameFile) end
     end
 end)
 
@@ -206,25 +281,14 @@ local function onDisconnectDetected(reason, errCode)
         end
     end)
 
-    -- 3. In-Game Auto-Rejoin Loop (ยกเว้น Error 276/273 บัญชีซ้อนจากเครื่องอื่น)
+    -- 3. In-Game Auto-Rejoin Loop (ออกแมพเข้าใหม่ในหน้าต่างเดิม ไม่ปิด Roblox! ยกเว้น Error 276/273 บัญชีซ้อน)
     local lowerReason = tostring(disconnectReason):lower()
     local isSameAccount = (disconnectErrorCode == 276 or disconnectErrorCode == 273 or lowerReason:find("same account") or lowerReason:find("276"))
-    if not isSameAccount then
+    local cfg = getAutoRejoinConfig()
+    if not isSameAccount and cfg.enabled then
         task.spawn(function()
-            local targetPlaceId = (tonumber(game.GameId) == AA_UNIVERSE_ID or game.PlaceId == AA_LOBBY_PLACE_ID or game.PlaceId == 8349889591)
-                and AA_LOBBY_PLACE_ID
-                or game.PlaceId
-            task.wait(5)
-            local attempt = 0
-            while env._COOK45_TRACKER_RUN_ID == CURRENT_RUN_ID do
-                attempt = attempt + 1
-                warn(string.format("[AutoRejoin] 🔄 Attempting In-Game Rejoin #%d -> PlaceId %d ...", attempt, targetPlaceId))
-                pcall(function() GuiService:ClearError() end)
-                pcall(function()
-                    TeleportService:Teleport(targetPlaceId, player)
-                end)
-                task.wait(8)
-            end
+            task.wait(4)
+            startInGameTeleportLoop(nil, disconnectReason)
         end)
     end
 end
@@ -341,6 +405,47 @@ end
 
 -- ส่ง Heartbeat ครั้งแรกทันทีที่โหลดสคริปต์ติด
 pulseHeartbeat()
+
+-- ลูปรับคำสั่ง In-Game Rejoin จากโปรแกรม NexusRobloxManager.exe (ทุกๆ 2 วินาที) + เช็ค UI บอทค้าง
+task.spawn(function()
+    local uiValidated = false
+    while task.wait(2) do
+        if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
+        if isFileSystemSupported then
+            pcall(function()
+                local cmdRaw = nil
+                if isfile(pcCmdByUidFile) then
+                    cmdRaw = readfile(pcCmdByUidFile)
+                    delfile(pcCmdByUidFile)
+                elseif isfile(pcCmdByNameFile) then
+                    cmdRaw = readfile(pcCmdByNameFile)
+                    delfile(pcCmdByNameFile)
+                end
+                if cmdRaw then
+                    local placeArg = tonumber(tostring(cmdRaw):match("(%d+)"))
+                    startInGameTeleportLoop(placeArg, "Command from NexusRobloxManager")
+                end
+            end)
+        end
+
+        -- ตรวจสอบว่า XT_AnimeAdventuresUI เปิดขึ้นหรือไม่หลังเข้าแมพ Anime Adventures
+        if not uiValidated and not isInGameRejoining and tonumber(game.GameId) == AA_UNIVERSE_ID then
+            pcall(function()
+                local pg = player:FindFirstChild("PlayerGui")
+                local ui = pg and pg:FindFirstChild("XT_AnimeAdventuresUI")
+                if ui then
+                    uiValidated = true
+                else
+                    local cfg = getAutoRejoinConfig()
+                    if cfg.enabled and (os.time() - scriptLoadedAt) >= cfg.ui_timeout_sec then
+                        uiValidated = true
+                        startInGameTeleportLoop(cfg.place_id, "XT_AnimeAdventuresUI did not open in time")
+                    end
+                end
+            end)
+        end
+    end
+end)
 
 -- ส่ง Heartbeat สม่ำเสมอทุกๆ 5 วินาทีใน background thread
 task.spawn(function()
