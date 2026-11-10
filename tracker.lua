@@ -134,6 +134,7 @@ local pcCmdByUidFile = string.format("watchdog_cmd_%s.txt", tostring(player.User
 local pcCmdByNameFile = string.format("watchdog_cmd_%s.txt", tostring(player.Name))
 local isKickedOrDisconnected = false
 local isTeleportingFlag = false
+local teleportStartedAt = 0
 local isInGameRejoining = false
 local disconnectReason = ""
 local disconnectErrorCode = 0
@@ -198,7 +199,12 @@ end)
 pcall(function()
     player.OnTeleport:Connect(function(teleportState)
         pcall(function()
+            if teleportState == Enum.TeleportState.Failed then
+                isTeleportingFlag = false
+                return
+            end
             isTeleportingFlag = true
+            teleportStartedAt = os.time()
             if writefile then
                 local nowEpoch = os.time()
                 local nowStr = tostring(nowEpoch) .. "\n"
@@ -333,6 +339,27 @@ local function onDisconnectDetected(reason, errCode)
     end
 end
 
+-- ดักจับกรณีผู้เล่นกดออกจากแมพกลับหน้าหลัก (Leave Game -> Roblox Home Screen) โดยไม่ได้วาร์ปย้ายด่าน
+pcall(function()
+    Players.PlayerRemoving:Connect(function(plr)
+        pcall(function()
+            if plr == player and not isTeleportingFlag then
+                onDisconnectDetected("ออกจากแมพกลับหน้าหลัก (Left Game)", 2850)
+            end
+        end)
+    end)
+end)
+
+pcall(function()
+    game.Close:Connect(function()
+        pcall(function()
+            if not isTeleportingFlag then
+                onDisconnectDetected("ออกจากแมพกลับหน้าหลัก (Game Closed)", 2850)
+            end
+        end)
+    end)
+end)
+
 -- ดักจับเมื่อมี Error / Kick / Error Code 524 modal จาก GuiService (กรองเฉพาะ Disconnect/Error จริง ไม่นับ Code 285)
 pcall(function()
     GuiService.ErrorMessageChanged:Connect(function(msg)
@@ -413,6 +440,9 @@ local function pulseHeartbeat()
     pcall(function()
         local nowEpochInt = os.time()
         local nowEpoch = tostring(nowEpochInt)
+        if isTeleportingFlag and teleportStartedAt > 0 and (nowEpochInt - teleportStartedAt) > 15 and not isInGameRejoining then
+            isTeleportingFlag = false
+        end
         -- 1. Heartbeat สำหรับ Watchdog เช็คสถานะตัวรันใน Android (ทั้งรูปแบบ Watchdog และ Rokid)
         writefile(heartbeatFile, nowEpoch .. "\n")
         writefile(rokidCheckFile, "working:" .. nowEpoch .. "\n")
@@ -517,9 +547,9 @@ task.spawn(function()
     end
 end)
 
--- ส่ง Heartbeat สม่ำเสมอทุกๆ 5 วินาทีใน background thread
+-- ส่ง Heartbeat สม่ำเสมอทุกๆ 2 วินาทีใน background thread (ตรวจจับไวเทียบเท่า Emu)
 task.spawn(function()
-    while task.wait(5) do
+    while task.wait(2) do
         if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
         if not isKickedOrDisconnected then
             pulseHeartbeat()
