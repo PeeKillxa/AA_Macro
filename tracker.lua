@@ -20,6 +20,7 @@ local GuiService = game:GetService("GuiService")
 local TeleportService = game:GetService("TeleportService")
 
 local API_URL = "https://nexuse-website.vercel.app/api/telemetry"
+local MATCH_LOG_API_URL = "https://nexuse-website.vercel.app/api/match-logs"
 local SEND_INTERVAL = 15 -- ส่งข้อมูลทุกๆ 15 วินาที
 local AA_LOBBY_PLACE_ID = 8304191830
 local AA_UNIVERSE_ID = 3183403065
@@ -558,17 +559,444 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- 🏆 ANIME ADVENTURES MATCH WIN DETECTOR (ResultsUI Watcher)
--- ตรวจจับหน้าจอจบด่าน (ResultsUI.Holder.Title == "VICTORY" หรือ ResultsUI.Finished)
--- บันทึกจำนวนครั้งที่ชนะ (sessionWins) ลงไฟล์ทันทีและส่งเข้าเว็บก่อนวาร์ป Replay
+-- 🔍 ANIME ADVENTURES LIVE DATA EXTRACTOR (Map, Team, Portals, Units, Rewards)
 -- ============================================================
-local hasCountedMatchResult = false
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local cachedAASession = nil
+local cachedAAData = { loaded = false, units = nil, traits = nil, items = nil, loader = nil }
+local cachedLevelData = nil
+local lastNonEmptyPlacedUnits = {}
+
+local function getAAData()
+    if cachedAAData.loaded then return cachedAAData end
+    cachedAAData.loaded = true
+    pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        if src then
+            local loaderMod = src:FindFirstChild("Loader")
+            if loaderMod then
+                local ok, L = pcall(require, loaderMod)
+                if ok and type(L) == "table" then cachedAAData.loader = L end
+            end
+            local dataF = src:FindFirstChild("Data")
+            if dataF then
+                local uMod = dataF:FindFirstChild("Units")
+                local tMod = dataF:FindFirstChild("Traits")
+                local iMod = dataF:FindFirstChild("Items")
+                if uMod then
+                    local ok, d = pcall(require, uMod)
+                    if ok and type(d) == "table" then cachedAAData.units = d end
+                end
+                if tMod then
+                    local ok, d = pcall(require, tMod)
+                    if ok and type(d) == "table" then cachedAAData.traits = d end
+                end
+                if iMod then
+                    local ok, d = pcall(require, iMod)
+                    if ok and type(d) == "table" then cachedAAData.items = d end
+                end
+            end
+        end
+    end)
+    return cachedAAData
+end
+
+local function getAASession()
+    if cachedAASession and type(cachedAASession) == "table" and cachedAASession.profile_data then
+        return cachedAASession
+    end
+    if type(filtergc) == "function" then
+        pcall(function()
+            local s = filtergc("table", { Keys = { "profile_data", "collection", "inventory" } }, true)
+            if type(s) == "table" and s.profile_data then
+                cachedAASession = s
+            end
+        end)
+    end
+    return cachedAASession
+end
+
+local function calcPlayerLevelFromXp(xp)
+    local x = tonumber(xp) or 0
+    if x <= 0 then return 1 end
+    return math.max(1, math.floor((math.sqrt(56 * x + 37249) - 179) * 0.07142857142857142))
+end
+
+local function calcUnitLevelFromXp(xp)
+    local x = tonumber(xp) or 0
+    if x <= 0 then return 1 end
+    return math.max(1, math.floor((math.log(x / 1000 + 1)) / 0.0769610411361284) + 1)
+end
+
+local function trimStr(s)
+    if type(s) ~= "string" then return "" end
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function stripRichText(s)
+    if type(s) ~= "string" then return "" end
+    return trimStr((s:gsub("<[^<>]->", "")))
+end
 
 local function getCurrentWave()
     local ok, val = pcall(function()
         return workspace._wave_num and tonumber(workspace._wave_num.Value) or 0
     end)
     return (ok and val) or 0
+end
+
+-- ดึงชื่อแมพเกมอัตโนมัติ (Lobby = [☀️UPD 21🏖️] Anime Adventures, Match = Haunted Academy (Summer) Summer Hunt ฯลฯ)
+local gameName = "[☀️UPD 21🏖️] Anime Adventures"
+pcall(function()
+    local info = MarketplaceService:GetProductInfo(game.PlaceId)
+    if info and info.Name and info.Name ~= "Game-2" and info.Name ~= "เกม 2" then
+        gameName = info.Name
+    end
+end)
+
+local function getCurrentMapInfo()
+    local data = getAAData()
+    local isLobby = (game.PlaceId == AA_LOBBY_PLACE_ID)
+    if data.loader and data.loader.IsLobby ~= nil then
+        isLobby = (data.loader.IsLobby == true)
+    end
+
+    if isLobby then
+        local lobbyTitle = gameName
+        pcall(function()
+            local info = MarketplaceService:GetProductInfo(AA_LOBBY_PLACE_ID)
+            if info and info.Name and info.Name ~= "" then
+                lobbyTitle = info.Name
+            end
+        end)
+        return {
+            map_name = lobbyTitle,
+            difficulty = "",
+            is_lobby = true
+        }
+    end
+
+    -- อยู่ในด่าน: ดึงจาก Loader.LevelData หรือ _MAP_CONFIG.GetLevelData (cache ต่อตา)
+    if not cachedLevelData then
+        pcall(function()
+            if data.loader and type(data.loader.LevelData) == "table" and (data.loader.LevelData.name or data.loader.LevelData._location_name) then
+                cachedLevelData = data.loader.LevelData
+            else
+                local mc = workspace:FindFirstChild("_MAP_CONFIG")
+                local rf = mc and mc:FindFirstChild("GetLevelData")
+                if rf and rf:IsA("RemoteFunction") then
+                    local ok, res = pcall(function() return rf:InvokeServer() end)
+                    if ok and type(res) == "table" then
+                        cachedLevelData = res
+                    end
+                end
+            end
+        end)
+    end
+
+    local locName = cachedLevelData and trimStr(tostring(cachedLevelData._location_name or "")) or ""
+    local lvlName = cachedLevelData and trimStr(tostring(cachedLevelData.name or "")) or ""
+    local difficulty = cachedLevelData and trimStr(tostring(cachedLevelData._difficulty or "")) or ""
+
+    -- สำรองจาก HUD บนหน้าจอ (Waves.HealthBar.LevelTitle)
+    pcall(function()
+        local pg = player:FindFirstChild("PlayerGui")
+        local waves = pg and pg:FindFirstChild("Waves")
+        local hb = waves and waves:FindFirstChild("HealthBar")
+        local lt = hb and hb:FindFirstChild("LevelTitle")
+        if lt then
+            local hudMap = lt:FindFirstChild("Map") and trimStr(tostring(lt.Map.Text or "")) or ""
+            local hudLvl = lt:FindFirstChild("Level") and trimStr(tostring(lt.Level.Text or "")) or ""
+            if locName == "" and hudMap ~= "" then locName = hudMap end
+            if lvlName == "" and hudLvl ~= "" then lvlName = hudLvl end
+        end
+    end)
+
+    local combined = ""
+    if locName ~= "" and lvlName ~= "" then
+        if locName == lvlName then
+            combined = locName
+        else
+            combined = locName .. " " .. lvlName
+        end
+    elseif locName ~= "" then
+        combined = locName
+    elseif lvlName ~= "" then
+        combined = lvlName
+    else
+        combined = gameName
+    end
+
+    return {
+        map_name = combined,
+        difficulty = difficulty,
+        is_lobby = false
+    }
+end
+
+local function resolveTraitNames(rawTraits)
+    local list = {}
+    if type(rawTraits) ~= "table" then return list end
+    local data = getAAData()
+    local traitsInfo = data.traits and data.traits.info
+
+    local function addTrait(tid)
+        if type(tid) ~= "string" or tid == "" then return end
+        local displayName = tid
+        if traitsInfo and type(traitsInfo[tid]) == "table" and traitsInfo[tid].name then
+            displayName = tostring(traitsInfo[tid].name)
+        else
+            displayName = tid:sub(1, 1):upper() .. tid:sub(2)
+        end
+        table.insert(list, displayName)
+    end
+
+    for k, v in pairs(rawTraits) do
+        if type(v) == "string" then
+            addTrait(v)
+        elseif type(v) == "table" and (v.trait or v.id) then
+            addTrait(tostring(v.trait or v.id))
+        elseif v == true and type(k) == "string" then
+            addTrait(k)
+        end
+    end
+    return list
+end
+
+local function getEquippedTeam()
+    local team = {}
+    local data = getAAData()
+    local unitsData = data.units
+    local sess = getAASession()
+
+    if sess and sess.collection and sess.collection.collection_profile_data then
+        local cpd = sess.collection.collection_profile_data
+        local eq = cpd.equipped_units
+        local owned = cpd.owned_units
+        if type(eq) == "table" and type(owned) == "table" then
+            for slotIdx = 1, 6 do
+                local uuid = eq[tostring(slotIdx)] or eq[slotIdx]
+                if uuid and owned[uuid] then
+                    local u = owned[uuid]
+                    local uid = tostring(u.unit_id or "unknown")
+                    local def = unitsData and unitsData[uid]
+                    local unitName = (def and def.name) or uid
+                    local rarity = (def and def.rarity) or ""
+                    local lvl = calcUnitLevelFromXp(u.xp)
+                    local traitList = resolveTraitNames(u.traits)
+                    table.insert(team, {
+                        slot = slotIdx,
+                        unit_id = uid,
+                        name = unitName,
+                        level = lvl,
+                        rarity = rarity,
+                        shiny = (u.shiny == true),
+                        traits = traitList,
+                        trait = table.concat(traitList, ", ")
+                    })
+                end
+            end
+        end
+    end
+
+    -- Fallback จาก PlayerGui.spawn_units เฉพาะช่องที่มี attribute _equipped_frame_unit_uuid จริง
+    if #team == 0 then
+        pcall(function()
+            local pg = player:FindFirstChild("PlayerGui")
+            local su = pg and pg:FindFirstChild("spawn_units")
+            local uf = su and su:FindFirstChild("Lives") and su.Lives:FindFirstChild("Frame") and su.Lives.Frame:FindFirstChild("Units")
+            if uf then
+                for slotIdx = 1, 6 do
+                    local frame = uf:FindFirstChild(tostring(slotIdx))
+                    if frame and frame:GetAttribute("_equipped_frame_unit_uuid") ~= nil then
+                        local nObj = frame:FindFirstChild("name")
+                        local lObj = frame:FindFirstChild("Main") and frame.Main:FindFirstChild("Level")
+                        if nObj and nObj.Text ~= "" then
+                            table.insert(team, {
+                                slot = slotIdx,
+                                name = trimStr(nObj.Text),
+                                level = (lObj and tonumber(lObj.Text)) or 1,
+                                shiny = false,
+                                traits = {},
+                                trait = ""
+                            })
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    return team
+end
+
+local function getPortalsSummary()
+    local portals = {}
+    local sess = getAASession()
+    local data = getAAData()
+    local itemsData = data.items
+
+    if sess and sess.inventory and sess.inventory.inventory_profile_data then
+        local uniqueItems = sess.inventory.inventory_profile_data.unique_items
+        if type(uniqueItems) == "table" then
+            local grouped = {}
+            for _, item in pairs(uniqueItems) do
+                if type(item) == "table" then
+                    local iid = tostring(item.item_id or item.id or "")
+                    local def = itemsData and itemsData[iid]
+                    local displayName = (def and def.name) or iid
+                    local tier = tonumber(item._portal_depth or item.portal_depth or 0) or 0
+                    if tier > 0 or iid:lower():find("portal") or tostring(displayName):lower():find("portal") then
+                        local gk = displayName .. "::" .. tostring(tier)
+                        if not grouped[gk] then
+                            grouped[gk] = {
+                                name = displayName,
+                                tier = tier > 0 and tier or nil,
+                                count = 0,
+                                item_id = iid
+                            }
+                        end
+                        grouped[gk].count = grouped[gk].count + 1
+                    end
+                end
+            end
+            for _, g in pairs(grouped) do
+                table.insert(portals, g)
+            end
+            table.sort(portals, function(a, b)
+                if a.count ~= b.count then return a.count > b.count end
+                return tostring(a.name) < tostring(b.name)
+            end)
+        end
+    end
+
+    return portals
+end
+
+local function snapshotPlacedUnits()
+    local summary = {}
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return summary end
+    local data = getAAData()
+    local unitsData = data.units
+    local grouped = {}
+
+    for _, unit in ipairs(unitsFolder:GetChildren()) do
+        pcall(function()
+            local st = unit:FindFirstChild("_stats")
+            local ownerVal = st and st:FindFirstChild("player")
+            if ownerVal and ownerVal.Value == player then
+                local idVal = st:FindFirstChild("id")
+                local uid = idVal and tostring(idVal.Value) or unit.Name
+                local def = unitsData and unitsData[uid]
+                local unitName = (def and def.name) or unit.Name
+                local upgCur = (st:FindFirstChild("upgrade") and tonumber(st.upgrade.Value)) or 0
+                local upgMax = (st:FindFirstChild("max_upgrade") and tonumber(st.max_upgrade.Value))
+                    or (def and type(def.upgrade) == "table" and #def.upgrade)
+                    or 0
+                local kills = (st:FindFirstChild("kills") and tonumber(st.kills.Value)) or 0
+
+                local gk = string.format("%s|%d|%d", unitName, upgCur, upgMax)
+                if not grouped[gk] then
+                    grouped[gk] = {
+                        count = 0,
+                        name = unitName,
+                        kills = 0,
+                        upg_cur = upgCur,
+                        upg_max = upgMax
+                    }
+                end
+                grouped[gk].count = grouped[gk].count + 1
+                grouped[gk].kills = grouped[gk].kills + kills
+            end
+        end)
+    end
+
+    for _, item in pairs(grouped) do
+        table.insert(summary, item)
+    end
+    table.sort(summary, function(a, b)
+        if a.kills ~= b.kills then return a.kills > b.kills end
+        return a.count > b.count
+    end)
+    return summary
+end
+
+-- คอยเก็บภาพรวมยูนิตที่วางในด่านไว้เรื่อยๆ (กันกรณี AutoSell ขายทิ้งหมดก่อนจอดับ ResultsUI)
+task.spawn(function()
+    while task.wait(3) do
+        if env._COOK45_TRACKER_RUN_ID ~= CURRENT_RUN_ID then break end
+        pcall(function()
+            local w = getCurrentWave()
+            if w <= 1 and #lastNonEmptyPlacedUnits > 0 then
+                local cur = snapshotPlacedUnits()
+                if #cur == 0 then
+                    lastNonEmptyPlacedUnits = {}
+                end
+            end
+            local snap = snapshotPlacedUnits()
+            if #snap > 0 then
+                lastNonEmptyPlacedUnits = snap
+            end
+        end)
+    end
+end)
+
+-- ============================================================
+-- 🏆 ANIME ADVENTURES MATCH WIN & WEBHOOK DETECTOR (ResultsUI Watcher)
+-- ============================================================
+local hasCountedMatchResult = false
+local getGameStats
+local detectDeviceName
+
+local function collectResultsRewards(holder)
+    local rewards = {}
+    pcall(function()
+        local lr = holder and holder:FindFirstChild("LevelRewards")
+        local sf = lr and lr:FindFirstChild("ScrollingFrame")
+        if not sf then return end
+
+        local labelMap = {
+            XPReward = "XP",
+            GoldReward = "Gold",
+            GemReward = "Gems",
+            TrophyReward = "Trophies",
+        }
+        local resLabel = "Summer Pearls"
+        if cachedLevelData and cachedLevelData.roguelike_multiplier_resource then
+            if tostring(cachedLevelData.roguelike_multiplier_resource) == "SummerPearls" then
+                resLabel = "Summer Pearls"
+            else
+                resLabel = tostring(cachedLevelData.roguelike_multiplier_resource)
+            end
+        end
+
+        for _, child in ipairs(sf:GetChildren()) do
+            if child:IsA("GuiObject") and child.Visible and child.Name ~= "Configuration" then
+                local main = child:FindFirstChild("Main")
+                local amtObj = main and main:FindFirstChild("Amount")
+                local amtText = amtObj and stripRichText(tostring(amtObj.Text or "")) or ""
+                if amtText ~= "" then
+                    local knownSuffix = labelMap[child.Name]
+                    if knownSuffix then
+                        if not amtText:upper():find(knownSuffix:upper()) then
+                            table.insert(rewards, amtText .. " " .. knownSuffix)
+                        else
+                            table.insert(rewards, amtText)
+                        end
+                    elseif child.Name == "ResourceReward" then
+                        table.insert(rewards, amtText .. " " .. resLabel)
+                    else
+                        local itemNameObj = (main and (main:FindFirstChild("ItemName") or main:FindFirstChild("Title") or main:FindFirstChild("name")))
+                            or child:FindFirstChild("name")
+                        local itemName = itemNameObj and stripRichText(tostring(itemNameObj.Text or "")) or child.Name
+                        table.insert(rewards, amtText .. " " .. itemName)
+                    end
+                end
+            end
+        end
+    end)
+    return rewards
 end
 
 task.spawn(function()
@@ -579,14 +1007,16 @@ task.spawn(function()
             local rui = pg and pg:FindFirstChild("ResultsUI")
             local holder = rui and rui:FindFirstChild("Holder")
             local finished = rui and rui:FindFirstChild("Finished")
-            local isResultsOpen = rui and (
-                rui.Enabled == true
-                or (holder and holder.Visible == true)
+            local isResultsOpen = rui and rui.Enabled == true and (
+                (holder and holder.Visible == true)
                 or (finished and finished.Visible == true)
             )
 
             if isResultsOpen then
                 if not hasCountedMatchResult then
+                    hasCountedMatchResult = true
+                    task.wait(0.8) -- รอ UI ใส่ Rewards / Timer / Wave ให้ครบ
+
                     local titleObj = holder and holder:FindFirstChild("Title")
                     local titleText = titleObj and tostring(titleObj.Text or ""):upper() or ""
                     local isDefeat = titleText:find("DEFEAT") ~= nil or titleText:find("LOSE") ~= nil or titleText:find("OVER") ~= nil
@@ -594,22 +1024,91 @@ task.spawn(function()
                         or ((rui.Enabled or (finished and finished.Visible)) and not isDefeat and titleText ~= "")
                         or (finished and finished.Visible and not isDefeat)
 
-                    if isVictory or isDefeat then
-                        hasCountedMatchResult = true
-                        if isVictory then
-                            sessionWins = sessionWins + 1
-                            saveSessionData()
-                            print(string.format("[FarmDashboard] 🏆 VICTORY DETECTED! Total Wins: %d", sessionWins))
-                            if sendTelemetry then
-                                task.spawn(function()
-                                    pcall(sendTelemetry, "ONLINE")
-                                end)
-                            end
-                        end
+                    if isVictory then
+                        sessionWins = sessionWins + 1
+                        saveSessionData()
+                        print(string.format("[FarmDashboard] 🏆 VICTORY DETECTED! Total Wins: %d", sessionWins))
                     end
+
+                    -- เก็บข้อมูลแบบ Webhook Card ส่งเข้า /api/match-logs
+                    pcall(function()
+                        local gs = getGameStats and getGameStats() or { level = 1, player_xp = 0, gems = 0, gold = 0, summer_pearls = 0, rerolls = 0 }
+                        local mapInfo = getCurrentMapInfo()
+                        local portals = getPortalsSummary()
+                        local team = getEquippedTeam()
+                        local placedUnits = snapshotPlacedUnits()
+                        if #placedUnits == 0 and #lastNonEmptyPlacedUnits > 0 then
+                            placedUnits = lastNonEmptyPlacedUnits
+                        end
+
+                        local middle = holder and holder:FindFirstChild("Middle")
+                        local timerText = middle and middle:FindFirstChild("Timer") and tostring(middle.Timer.Text or "") or ""
+                        local duration = trimStr(timerText:gsub("^Total Time:%s*", ""))
+                        if duration == "" then duration = "00:00" end
+
+                        local wavesText = middle and middle:FindFirstChild("WavesCompleted") and tostring(middle.WavesCompleted.Text or "") or ""
+                        local waveNum = tonumber(wavesText:match("(%d+)")) or getCurrentWave()
+
+                        local totalKills = 0
+                        local totalDamage = 0
+                        local lpStats = player:FindFirstChild("_stats")
+                        if lpStats then
+                            local kObj = lpStats:FindFirstChild("kills") or lpStats:FindFirstChild("pve_kills")
+                            local dObj = lpStats:FindFirstChild("damage_dealt")
+                            if kObj and tonumber(kObj.Value) then totalKills = math.floor(tonumber(kObj.Value)) end
+                            if dObj and tonumber(dObj.Value) then totalDamage = math.floor(tonumber(dObj.Value)) end
+                        end
+
+                        local rewards = collectResultsRewards(holder)
+
+                        local matchPayload = {
+                            user_id = player.UserId,
+                            username = player.Name,
+                            display_name = player.DisplayName,
+                            avatar_url = string.format(
+                                "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=150&height=150&format=png",
+                                player.UserId
+                            ),
+                            device_name = detectDeviceName and detectDeviceName() or "PC",
+                            level = gs.level,
+                            player_xp = gs.player_xp or 0,
+                            gems = gs.gems,
+                            gold = gs.gold,
+                            summer_pearls = gs.summer_pearls or gs.april_coins or 0,
+                            rerolls = gs.rerolls or 0,
+                            rewards = rewards,
+                            portals = portals,
+                            units = placedUnits,
+                            team = team,
+                            result = isVictory and "VICTORY" or "DEFEAT",
+                            duration = duration,
+                            wave = waveNum,
+                            map_name = mapInfo.map_name,
+                            difficulty = mapInfo.difficulty,
+                            kills = totalKills,
+                            damage = totalDamage,
+                            logged_at = os.time()
+                        }
+
+                        task.spawn(function()
+                            pcall(function()
+                                httpRequest({
+                                    Url = MATCH_LOG_API_URL,
+                                    Method = "POST",
+                                    Headers = {
+                                        ["Content-Type"] = "application/json",
+                                        ["User-Agent"] = "RobloxTelemetry/2.7"
+                                    },
+                                    Body = HttpService:JSONEncode(matchPayload)
+                                })
+                            end)
+                            if sendTelemetry then
+                                pcall(sendTelemetry, "ONLINE")
+                            end
+                        end)
+                    end)
                 end
             else
-                -- รีเซ็ตตัวล็อกเมื่อปิดหน้า ResultsUI หรือเริ่มเวฟใหม่ (Wave 0/1)
                 if hasCountedMatchResult and getCurrentWave() <= 1 then
                     hasCountedMatchResult = false
                 end
@@ -620,16 +1119,10 @@ end)
 
 -- ตัวแปรเก็บค่าล่าสุด (ป้องกันค่าเพชร/เวลกลายเป็น 0 หรือ 1 ตอนกำลังโหลดห้อง Replay)
 local cached_level = 1
+local cached_xp = 0
 local cached_gems = 0
 local cached_gold = 0
 local cached_rerolls = 0
-
--- ดึงชื่อแมพเกมอัตโนมัติ
-local gameName = "Roblox Game"
-pcall(function()
-    local info = MarketplaceService:GetProductInfo(game.PlaceId)
-    if info and info.Name then gameName = info.Name end
-end)
 
 -- ฟังก์ชันคำนวณ FPS ปัจจุบัน
 local currentFps = 60
@@ -689,11 +1182,12 @@ local function findGuiStat(pattern)
 end
 
 -- ฟังก์ชันดึงค่า Gems / Gold / Level / AprilCoins แบบละเอียด (รองรับทั้ง Lobby และห้องเล่น Story/Match)
-local function getGameStats()
+getGameStats = function()
     local stats = {
         gems = 0,
         gold = 0,
         level = 0,
+        player_xp = 0,
         rerolls = 0,
         april_coins = 0,
         summer_pearls = 0
@@ -702,16 +1196,46 @@ local function getGameStats()
     local foundDirectGems = false
     local foundDirectGold = false
     local foundDirectPearls = false
+    local foundDirectRerolls = false
 
-    -- ตรวจสอบ _stats จาก LocalPlayer โดยตรง (Gems, Gold, Summer Coin)
-    -- Gems: game:GetService("Players").LocalPlayer._stats.gem_amount
-    -- Gold: game:GetService("Players").LocalPlayer._stats.gold_amount
-    -- Summer Coin: game:GetService("Players").LocalPlayer._stats._resourceSummerPearls
+    -- 0. อ่านจาก Anime Adventures Profile Data โดยตรง (แม่นยำ 100% ทั้งใน Lobby และในแมพ)
+    pcall(function()
+        local sess = getAASession()
+        if sess and sess.profile_data then
+            local p = sess.profile_data
+            if tonumber(p.gem_amount) then
+                stats.gems = tonumber(p.gem_amount)
+                foundDirectGems = true
+            end
+            if tonumber(p.gold_amount) then
+                stats.gold = tonumber(p.gold_amount)
+                foundDirectGold = true
+            end
+            if tonumber(p.trait_reroll_tokens) then
+                stats.rerolls = tonumber(p.trait_reroll_tokens)
+                foundDirectRerolls = true
+            end
+            if tonumber(p.player_xp) then
+                stats.player_xp = tonumber(p.player_xp)
+                stats.level = calcPlayerLevelFromXp(stats.player_xp)
+            end
+            if type(p.resources) == "table" and tonumber(p.resources.SummerPearls) then
+                local spVal = tonumber(p.resources.SummerPearls)
+                if spVal >= 0 then
+                    stats.summer_pearls = spVal
+                    stats.april_coins = spVal
+                    foundDirectPearls = true
+                end
+            end
+        end
+    end)
+
+    -- ตรวจสอบ _stats จาก LocalPlayer โดยตรง (Gems, Gold, Summer Coin, PlayerXP)
     pcall(function()
         local s = player:FindFirstChild("_stats")
         if s then
             local gemObj = s:FindFirstChild("gem_amount")
-            if gemObj and gemObj.Value ~= nil then
+            if not foundDirectGems and gemObj and gemObj.Value ~= nil then
                 local gVal = tonumber(gemObj.Value) or parseNumber(tostring(gemObj.Value))
                 if gVal and gVal >= 0 then
                     stats.gems = gVal
@@ -720,7 +1244,7 @@ local function getGameStats()
             end
 
             local goldObj = s:FindFirstChild("gold_amount")
-            if goldObj and goldObj.Value ~= nil then
+            if not foundDirectGold and goldObj and goldObj.Value ~= nil then
                 local auVal = tonumber(goldObj.Value) or parseNumber(tostring(goldObj.Value))
                 if auVal and auVal >= 0 then
                     stats.gold = auVal
@@ -735,6 +1259,16 @@ local function getGameStats()
                     stats.summer_pearls = val
                     stats.april_coins = val
                     foundDirectPearls = true
+                end
+            end
+
+            local xpObj = s:FindFirstChild("player_xp")
+            if xpObj and xpObj.Value ~= nil then
+                local xpVal = tonumber(xpObj.Value) or 0
+                if xpVal >= stats.player_xp then
+                    stats.player_xp = xpVal
+                    local calcLvl = calcPlayerLevelFromXp(xpVal)
+                    if calcLvl > stats.level then stats.level = calcLvl end
                 end
             end
         end
@@ -916,8 +1450,14 @@ local function getGameStats()
 
     if stats.rerolls > 0 then
         cached_rerolls = stats.rerolls
-    else
+    elseif not foundDirectRerolls then
         stats.rerolls = cached_rerolls
+    end
+
+    if stats.player_xp > 0 then
+        cached_xp = stats.player_xp
+    else
+        stats.player_xp = cached_xp
     end
 
     local effective_pearls = (stats.summer_pearls and stats.summer_pearls > 0 and stats.summer_pearls) or stats.april_coins or 0
@@ -938,7 +1478,7 @@ local function getGameStats()
 end
 
 -- ฟังก์ชันส่ง Telemetry เข้าเว็บ Vercel
-local function detectDeviceName()
+detectDeviceName = function()
     if isfile and readfile and isfile("device_name.txt") then
         local ok, content = pcall(readfile, "device_name.txt")
         if ok and content and #content > 0 then
@@ -968,32 +1508,47 @@ sendTelemetry = function(customStatus)
 
     local gameStats = getGameStats()
     local curWave = getCurrentWave()
+    local mapInfo = getCurrentMapInfo()
+    local teamList = getEquippedTeam()
+    local portalsList = getPortalsSummary()
+    local devName = detectDeviceName()
+    local waveStr = mapInfo.is_lobby and "Lobby" or (curWave > 0 and ("Wave " .. tostring(curWave)) or "Wave 0")
 
     local payload = {
         user_id = player.UserId,
         username = player.Name,
         display_name = player.DisplayName,
-        device_name = detectDeviceName(),
+        device_name = devName,
         avatar_url = string.format(
             "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=150&height=150&format=png",
             player.UserId
         ),
         account_age = player.AccountAge,
-        game_name = gameName,
+        game_name = mapInfo.map_name,
+        map_name = mapInfo.map_name,
+        map_difficulty = mapInfo.difficulty,
+        wave = waveStr,
         place_id = game.PlaceId,
         job_id = (game.JobId ~= "" and game.JobId) or "private-server",
         status = isKickedOrDisconnected and "OFFLINE" or (customStatus or "ONLINE"),
         level = gameStats.level,
+        player_xp = gameStats.player_xp,
         gems = gameStats.gems,
         gold = gameStats.gold,
         april_coins = gameStats.april_coins,
         summer_pearls = gameStats.summer_pearls,
+        rerolls = gameStats.rerolls,
         wins = sessionWins,
         disconnects = sessionDisconnects,
+        team = teamList,
+        portals = portalsList,
         extra_stats = {
-            device_name = detectDeviceName(),
+            device_name = devName,
             rerolls = gameStats.rerolls,
-            wave = curWave > 0 and ("Wave " .. tostring(curWave)) or "Lobby"
+            player_xp = gameStats.player_xp,
+            map_name = mapInfo.map_name,
+            difficulty = mapInfo.difficulty,
+            wave = waveStr
         },
         ping = pingMs,
         fps = currentFps,
@@ -1009,7 +1564,7 @@ sendTelemetry = function(customStatus)
             Method = "POST",
             Headers = {
                 ["Content-Type"] = "application/json",
-                ["User-Agent"] = "RobloxTelemetry/2.5"
+                ["User-Agent"] = "RobloxTelemetry/2.7"
             },
             Body = HttpService:JSONEncode(payload)
         })
